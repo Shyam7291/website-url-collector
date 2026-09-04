@@ -32,8 +32,9 @@ def env(name,default,typ):
 class Config:
     max_pagination_pages:int=2; max_load_more_clicks:int=1; max_year_options:int=2
     max_depth:int=12; max_pages_per_website:int=3000; page_timeout_seconds:int=45
-    delay_between_pages_seconds:float=1.5; max_retries:int=2; max_runtime_minutes:int=170
-    crawl_subdomains:bool=True; stabilization_seconds:float=2.0
+    delay_between_pages_seconds:float=0.35; max_retries:int=2; max_runtime_minutes:int=170
+    crawl_subdomains:bool=True; stabilization_seconds:float=0.6
+    restrict_to_seed_language:bool=True; export_checkpoint_pages:int=25
     keep_meaningful_query_parameters:tuple=('year','page','category','type','section')
     remove_query_parameters:tuple=('utm_source','utm_medium','utm_campaign','utm_term','utm_content','fbclid','gclid')
     allowed_hosts:tuple=()
@@ -45,7 +46,7 @@ class Config:
             if k not in names: raw.pop(k)
             elif isinstance(getattr(cls(),k),tuple): raw[k]=tuple(raw[k])
         c=cls(**raw)
-        mapping={'max_pagination_pages':('MAX_PAGINATION_PAGES',int),'max_load_more_clicks':('MAX_LOAD_MORE_CLICKS',int),'max_year_options':('MAX_YEAR_OPTIONS',int),'max_depth':('MAX_DEPTH',int),'max_pages_per_website':('MAX_PAGES',int),'page_timeout_seconds':('PAGE_TIMEOUT_SECONDS',int),'delay_between_pages_seconds':('DELAY_BETWEEN_PAGES_SECONDS',float),'max_retries':('MAX_RETRIES',int),'max_runtime_minutes':('MAX_RUNTIME_MINUTES',int),'crawl_subdomains':('CRAWL_SUBDOMAINS',bool)}
+        mapping={'max_pagination_pages':('MAX_PAGINATION_PAGES',int),'max_load_more_clicks':('MAX_LOAD_MORE_CLICKS',int),'max_year_options':('MAX_YEAR_OPTIONS',int),'max_depth':('MAX_DEPTH',int),'max_pages_per_website':('MAX_PAGES',int),'page_timeout_seconds':('PAGE_TIMEOUT_SECONDS',int),'delay_between_pages_seconds':('DELAY_BETWEEN_PAGES_SECONDS',float),'max_retries':('MAX_RETRIES',int),'max_runtime_minutes':('MAX_RUNTIME_MINUTES',int),'crawl_subdomains':('CRAWL_SUBDOMAINS',bool),'restrict_to_seed_language':('RESTRICT_TO_SEED_LANGUAGE',bool),'export_checkpoint_pages':('EXPORT_CHECKPOINT_PAGES',int)}
         for a,(e,t) in mapping.items(): setattr(c,a,env(e,getattr(c,a),t))
         c.max_pagination_pages=max(1,c.max_pagination_pages); return c
 
@@ -53,6 +54,10 @@ class Collector:
     def __init__(self,seed,cfg):
         self.cfg=cfg; self.seed=self.norm_seed(seed); self.host=urlsplit(self.seed).hostname.lower()
         ps=self.host.split('.'); self.base='.'.join(ps[-2:]) if len(ps)>1 else self.host
+        seed_path=urlsplit(self.seed).path or '/'
+        match=re.match(r'^/([a-z]{2}(?:-[a-z]{2})?)(?:/|$)',seed_path,re.I)
+        self.language_prefix=('/'+match.group(1).lower()+'/') if match else None
+        self.processed_since_export=0
         self.started=time.monotonic(); self.stop=False; self.page_limit=False; self.runtime_limit=False
         self.stats=dict(duplicates=0,pagination_detected=0,pagination_limits=0,pagination_states=0,load_more=0,max_depth=0)
         self.db=sqlite3.connect('crawler.db'); self.db.row_factory=sqlite3.Row; self.init_db()
@@ -83,6 +88,9 @@ class Collector:
     def doclike(self,u):return ext(u) in DOC_EXT or bool(DOC_HINT.search(u))
     def policy(self,u):
         if not self.internal(u):return False,'external'
+        path=(urlsplit(u).path or '/').lower()
+        if self.cfg.restrict_to_seed_language and self.language_prefix and not path.startswith(self.language_prefix):
+            return False,'outside seed language path '+self.language_prefix
         if ext(u) in ASSET_EXT:return False,'static asset'
         if self.doclike(u):return False,'document'
         if UNSAFE.search(urlsplit(u).path):return False,'unsafe route'
@@ -130,7 +138,7 @@ class Collector:
                     except PWError:pass
         except PWError:pass
     async def links(self,p):
-        """All rendered links, used only for normal child-page discovery."""
+        """All links are used for child-page discovery."""
         out=[];seen=set()
         for f in p.frames:
             if f!=p.main_frame and f.url and not self.internal(f.url):continue
@@ -141,20 +149,20 @@ class Collector:
                 if u and u not in seen:seen.add(u);out.append((u,t[:500],src))
         return out
     async def content_document_links(self,p):
-        """Document candidates from page-specific content only, never shared chrome."""
+        """Document candidates only from page content, excluding shared chrome."""
         out=[];seen=set()
-        script="""els => els.filter(a => {
-          const excluded = a.closest('header,footer,nav,aside,[role=navigation],[role=banner],[role=contentinfo],.header,.footer,.navbar,.navigation,.nav-menu,.menu,.sidebar,.cookie,.cookies,.cookie-banner,.cookie-consent,.social,.share');
-          if (excluded) return false;
-          const root = a.closest('main,article,[role=main],.main-content,.page-content,.content-area,.content-wrapper,.body-content');
-          return Boolean(root);
-        }).map(a => [a.href,(a.innerText||a.getAttribute('aria-label')||a.title||'').trim()])"""
-        fallback="""els => els.filter(a => !a.closest('header,footer,nav,aside,[role=navigation],[role=banner],[role=contentinfo],.header,.footer,.navbar,.navigation,.nav-menu,.menu,.sidebar,.cookie,.cookies,.cookie-banner,.cookie-consent,.social,.share')).map(a => [a.href,(a.innerText||a.getAttribute('aria-label')||a.title||'').trim()])"""
+        selector='a[href],area[href]'
+        js="""els=>els.filter(a=>{
+          const blocked=a.closest('header,footer,nav,aside,[role=navigation],[role=banner],[role=contentinfo],.header,.footer,.navbar,.navigation,.nav-menu,.menu,.sidebar,.cookie,.cookies,.cookie-banner,.cookie-consent,.social,.share');
+          if(blocked)return false;
+          return Boolean(a.closest('main,article,[role=main],.main-content,.page-content,.content-area,.content-wrapper,.body-content'));
+        }).map(a=>[a.href,(a.innerText||a.getAttribute('aria-label')||a.title||'').trim()])"""
+        fallback="""els=>els.filter(a=>!a.closest('header,footer,nav,aside,[role=navigation],[role=banner],[role=contentinfo],.header,.footer,.navbar,.navigation,.nav-menu,.menu,.sidebar,.cookie,.cookies,.cookie-banner,.cookie-consent,.social,.share')).map(a=>[a.href,(a.innerText||a.getAttribute('aria-label')||a.title||'').trim()])"""
         for f in p.frames:
             if f!=p.main_frame and f.url and not self.internal(f.url):continue
             try:
-                vals=await f.locator('a[href],area[href]').evaluate_all(script)
-                if not vals: vals=await f.locator('body a[href],body area[href]').evaluate_all(fallback)
+                vals=await f.locator(selector).evaluate_all(js)
+                if not vals:vals=await f.locator(selector).evaluate_all(fallback)
             except PWError:continue
             src='main_content' if f==p.main_frame else 'iframe_main_content'
             for u,t in vals:
@@ -172,13 +180,10 @@ class Collector:
         return bool(NEXT.match(text.strip()) and urlsplit(candidate).path.rstrip('/')==urlsplit(parent).path.rstrip('/'))
     async def scan(self,p,ctx,parent,depth,response_docs):
         all_links=await self.links(p);found=False;document_url=None;document_source=None
-        # Deliberately ignore passive document responses from shared/global components.
-        # Only a document link inside page-specific content may classify the page as PDF.
         for u,_,src in await self.content_document_links(p):
             if self.doclike(u) and await self.confirm(ctx,u):
                 found=True;document_url=u;document_source=src
                 logging.info('Document evidence source=%s page=%s document=%s',src,parent,u);break
-        # Link discovery still scans the full rendered page, including repeated navigation.
         for u,t,_ in all_links:
             n=self.norm(u,parent)
             if not n or self.doclike(n) or self.is_pagination(n,parent,t):continue
@@ -280,7 +285,9 @@ class Collector:
                 while not self.expired():
                     row=self.next()
                     if not row:break
-                    await self.process(ctx,row);self.export();await asyncio.sleep(self.cfg.delay_between_pages_seconds)
+                    await self.process(ctx,row);self.processed_since_export+=1
+                    if self.processed_since_export>=self.cfg.export_checkpoint_pages:self.export();self.processed_since_export=0
+                    await asyncio.sleep(self.cfg.delay_between_pages_seconds)
             finally:await ctx.close();await b.close()
 
 def seed_value(manual,path):
