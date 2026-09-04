@@ -1,0 +1,1 @@
+run_date,seed_url,discovered,processed,pdf_pages,html_pages,failed_pages,skipped_pages,duplicate_discoveries,max_depth,page_limit_reached,runtime_limit_reached,runtime_seconds
