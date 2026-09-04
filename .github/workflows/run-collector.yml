@@ -1,0 +1,77 @@
+name: Run Website URL Collector
+
+on:
+  workflow_dispatch:
+    inputs:
+      website_url:
+        description: Company homepage URL (blank uses seeds.csv)
+        required: false
+        default: ""
+        type: string
+      max_pages:
+        description: Maximum unique pages
+        required: true
+        default: "3000"
+        type: string
+      max_depth:
+        description: Maximum hierarchy depth
+        required: true
+        default: "12"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    env:
+      WEBSITE_URL: ${{ inputs.website_url }}
+      MAX_PAGES: ${{ inputs.max_pages }}
+      MAX_DEPTH: ${{ inputs.max_depth }}
+      MAX_PAGINATION_PAGES: "2"
+      MAX_LOAD_MORE_CLICKS: "1"
+      MAX_RUNTIME_MINUTES: "170"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Install Playwright Chromium and Linux dependencies
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run collector
+        run: python url_collector.py
+
+      - name: Ensure artifact paths exist
+        if: ${{ always() }}
+        run: touch classified_pages.csv pdf_pages.csv html_pages.csv failed_pages.csv crawler.db collector.log
+
+      - name: Upload collector results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: url-collector-results
+          path: |
+            classified_pages.csv
+            pdf_pages.csv
+            html_pages.csv
+            failed_pages.csv
+            crawler.db
+            collector.log
+          if-no-files-found: warn
+          retention-days: 30
