@@ -90,8 +90,9 @@ class Collector:
     def init_db(self):
         self.db.executescript("""
         PRAGMA journal_mode=WAL;
-        CREATE TABLE IF NOT EXISTS pages(id INTEGER PRIMARY KEY AUTOINCREMENT,seed_url TEXT NOT NULL,page_url TEXT NOT NULL,normalized_url TEXT NOT NULL UNIQUE,parent_url TEXT,link_text TEXT,depth INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'DISCOVERED',page_type TEXT,document_found INTEGER NOT NULL DEFAULT 0,http_status INTEGER,pagination_detected INTEGER NOT NULL DEFAULT 0,pagination_pages_checked INTEGER NOT NULL DEFAULT 1,pagination_limit_reached INTEGER NOT NULL DEFAULT 0,discovered_order INTEGER,processed_order INTEGER,discovered_at TEXT,processed_at TEXT,error_message TEXT);
+        CREATE TABLE IF NOT EXISTS pages(id INTEGER PRIMARY KEY AUTOINCREMENT,seed_url TEXT NOT NULL,page_url TEXT NOT NULL,normalized_url TEXT NOT NULL UNIQUE,parent_url TEXT,link_text TEXT,depth INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'DISCOVERED',page_type TEXT,document_found INTEGER NOT NULL DEFAULT 0,http_status INTEGER,pagination_detected INTEGER NOT NULL DEFAULT 0,pagination_pages_checked INTEGER NOT NULL DEFAULT 1,pagination_limit_reached INTEGER NOT NULL DEFAULT 0,document_url TEXT,document_source TEXT,discovered_order INTEGER,processed_order INTEGER,discovered_at TEXT,processed_at TEXT,error_message TEXT);
         CREATE TABLE IF NOT EXISTS links(id INTEGER PRIMARY KEY AUTOINCREMENT,from_url TEXT NOT NULL,to_url TEXT NOT NULL,normalized_to_url TEXT NOT NULL,link_text TEXT,discovered_at TEXT,UNIQUE(from_url,normalized_to_url));
+        CREATE TABLE IF NOT EXISTS document_evidence(id INTEGER PRIMARY KEY AUTOINCREMENT,source_url TEXT NOT NULL,document_url TEXT NOT NULL,detection_source TEXT NOT NULL,detected_at TEXT NOT NULL,UNIQUE(source_url,document_url));
         """); self.db.commit()
     def add(self,u,parent,text,depth):
         n=self.norm(u,parent or self.seed)
@@ -129,12 +130,33 @@ class Collector:
                     except PWError:pass
         except PWError:pass
     async def links(self,p):
+        """All rendered links, used only for normal child-page discovery."""
         out=[];seen=set()
         for f in p.frames:
             if f!=p.main_frame and f.url and not self.internal(f.url):continue
             try: vals=await f.locator('a[href],area[href]').evaluate_all("els=>els.map(a=>[a.href,(a.innerText||a.getAttribute('aria-label')||a.title||'').trim()])")
             except PWError:continue
-            src='main' if f==p.main_frame else 'iframe'
+            src='page' if f==p.main_frame else 'iframe'
+            for u,t in vals:
+                if u and u not in seen:seen.add(u);out.append((u,t[:500],src))
+        return out
+    async def content_document_links(self,p):
+        """Document candidates from page-specific content only, never shared chrome."""
+        out=[];seen=set()
+        script="""els => els.filter(a => {
+          const excluded = a.closest('header,footer,nav,aside,[role=navigation],[role=banner],[role=contentinfo],.header,.footer,.navbar,.navigation,.nav-menu,.menu,.sidebar,.cookie,.cookies,.cookie-banner,.cookie-consent,.social,.share');
+          if (excluded) return false;
+          const root = a.closest('main,article,[role=main],.main-content,.page-content,.content-area,.content-wrapper,.body-content');
+          return Boolean(root);
+        }).map(a => [a.href,(a.innerText||a.getAttribute('aria-label')||a.title||'').trim()])"""
+        fallback="""els => els.filter(a => !a.closest('header,footer,nav,aside,[role=navigation],[role=banner],[role=contentinfo],.header,.footer,.navbar,.navigation,.nav-menu,.menu,.sidebar,.cookie,.cookies,.cookie-banner,.cookie-consent,.social,.share')).map(a => [a.href,(a.innerText||a.getAttribute('aria-label')||a.title||'').trim()])"""
+        for f in p.frames:
+            if f!=p.main_frame and f.url and not self.internal(f.url):continue
+            try:
+                vals=await f.locator('a[href],area[href]').evaluate_all(script)
+                if not vals: vals=await f.locator('body a[href],body area[href]').evaluate_all(fallback)
+            except PWError:continue
+            src='main_content' if f==p.main_frame else 'iframe_main_content'
             for u,t in vals:
                 if u and u not in seen:seen.add(u);out.append((u,t[:500],src))
         return out
@@ -149,15 +171,19 @@ class Collector:
         if any(k.lower() in PKEYS for k in q) and self.norm(candidate,parent_view=True)==self.norm(parent,parent_view=True):return True
         return bool(NEXT.match(text.strip()) and urlsplit(candidate).path.rstrip('/')==urlsplit(parent).path.rstrip('/'))
     async def scan(self,p,ctx,parent,depth,response_docs):
-        links=await self.links(p);found=bool(response_docs)
-        if not found:
-            for u,_,src in links:
-                if self.doclike(u) and await self.confirm(ctx,u):found=True;logging.info('Document via %s %s',src,u);break
-        for u,t,_ in links:
+        all_links=await self.links(p);found=False;document_url=None;document_source=None
+        # Deliberately ignore passive document responses from shared/global components.
+        # Only a document link inside page-specific content may classify the page as PDF.
+        for u,_,src in await self.content_document_links(p):
+            if self.doclike(u) and await self.confirm(ctx,u):
+                found=True;document_url=u;document_source=src
+                logging.info('Document evidence source=%s page=%s document=%s',src,parent,u);break
+        # Link discovery still scans the full rendered page, including repeated navigation.
+        for u,t,_ in all_links:
             n=self.norm(u,parent)
             if not n or self.doclike(n) or self.is_pagination(n,parent,t):continue
             self.add(n,parent,t,depth+1)
-        return found,links
+        return found,all_links,document_url,document_source
     def page2_candidates(self,links,current):
         out=[]
         for u,t,s in links:
@@ -191,13 +217,14 @@ class Collector:
                 ct=(await r.all_headers()).get('content-type','').lower() if r else ''
                 if ct and 'text/html' not in ct and 'application/xhtml' not in ct:raise RuntimeError(f'Unexpected content type {ct}')
                 await self.settle(p);await self.cookie(p);await self.reveal(p);await self.settle(p)
-                found,links=await self.scan(p,ctx,u,depth,response_docs);checked=1;pdet=0;limit=0
+                found,links,document_url,document_source=await self.scan(p,ctx,u,depth,response_docs);checked=1;pdet=0;limit=0
                 cands=self.page2_candidates(links,u)
                 if cands and self.cfg.max_pagination_pages>1:
                     pdet=1;self.stats['pagination_detected']+=1;sig=await self.signature(p)
                     await p.goto(cands[0][0],wait_until='domcontentloaded',timeout=self.cfg.page_timeout_seconds*1000);await self.settle(p)
                     if await self.signature(p)!=sig:
-                        checked=2;self.stats['pagination_states']+=1;f2,l2=await self.scan(p,ctx,u,depth,response_docs);found|=f2
+                        checked=2;self.stats['pagination_states']+=1;f2,l2,d2,s2=await self.scan(p,ctx,u,depth,response_docs);found|=f2
+                        if f2 and not document_url:document_url,document_source=d2,s2
                         if self.page2_candidates(l2,u):limit=1
                     await p.goto(u,wait_until='domcontentloaded',timeout=self.cfg.page_timeout_seconds*1000);await self.settle(p)
                 elif cands:pdet=limit=1;self.stats['pagination_detected']+=1
@@ -208,7 +235,10 @@ class Collector:
                             el=controls.nth(i);text=((await el.inner_text(timeout=500)) or await el.get_attribute('aria-label') or '').strip()
                             if await el.is_visible() and (NEXT.match(text) or 'next' in text.lower()):
                                 sig=await self.signature(p);await el.click(timeout=3000);await self.settle(p);pdet=1;self.stats['pagination_detected']+=1
-                                if await self.signature(p)!=sig:checked=2;self.stats['pagination_states']+=1;f2,_=await self.scan(p,ctx,u,depth,response_docs);found|=f2
+                                if await self.signature(p)!=sig:
+                                    checked=2;self.stats['pagination_states']+=1
+                                    f2,_,d2,s2=await self.scan(p,ctx,u,depth,response_docs);found|=f2
+                                    if f2 and not document_url:document_url,document_source=d2,s2
                                 break
                     except PWError:pass
                 if self.cfg.max_load_more_clicks:
@@ -216,23 +246,29 @@ class Collector:
                         b=p.get_by_role('button').filter(has_text=LOAD).first
                         if await b.is_visible():
                             sig=await self.signature(p);await b.click(timeout=3000);await self.settle(p)
-                            if await self.signature(p)!=sig:self.stats['load_more']+=1;fm,_=await self.scan(p,ctx,u,depth,response_docs);found|=fm
+                            if await self.signature(p)!=sig:
+                                self.stats['load_more']+=1
+                                fm,_,dm,sm=await self.scan(p,ctx,u,depth,response_docs);found|=fm
+                                if fm and not document_url:document_url,document_source=dm,sm
                     except PWError:pass
                 if limit:self.stats['pagination_limits']+=1
                 order=self.db.execute('SELECT COALESCE(MAX(processed_order),0)+1 FROM pages').fetchone()[0]
-                self.db.execute("UPDATE pages SET status='PROCESSED',page_type=?,document_found=?,http_status=?,pagination_detected=?,pagination_pages_checked=?,pagination_limit_reached=?,processed_order=?,processed_at=?,error_message=NULL WHERE id=?",('PDF' if found else 'HTML',int(found),status,pdet,checked,limit,order,now(),row['id']));self.db.commit();logging.info('Classified %s %s','PDF' if found else 'HTML',u);await p.close();return
+                self.db.execute("UPDATE pages SET status='PROCESSED',page_type=?,document_found=?,http_status=?,pagination_detected=?,pagination_pages_checked=?,pagination_limit_reached=?,document_url=?,document_source=?,processed_order=?,processed_at=?,error_message=NULL WHERE id=?",('PDF' if found else 'HTML',int(found),status,pdet,checked,limit,document_url,document_source,order,now(),row['id']))
+                if found and document_url:self.db.execute('INSERT OR IGNORE INTO document_evidence(source_url,document_url,detection_source,detected_at) VALUES(?,?,?,?)',(u,document_url,document_source,now()))
+                self.db.commit();logging.info('Classified %s %s evidence=%s','PDF' if found else 'HTML',u,document_url or 'none');await p.close();return
             except (PWError,PWTimeout,RuntimeError) as e:
                 last=f'{type(e).__name__}: {e}'[:2000];logging.warning('Attempt failed %s %s',u,last);await p.close()
                 if attempt<=self.cfg.max_retries:await asyncio.sleep(min(2**attempt,10))
         order=self.db.execute('SELECT COALESCE(MAX(processed_order),0)+1 FROM pages').fetchone()[0]
         self.db.execute("UPDATE pages SET status='FAILED',page_type='FAILED',http_status=?,processed_order=?,processed_at=?,error_message=? WHERE id=?",(status,order,now(),last,row['id']));self.db.commit()
     def export(self):
-        cols='seed_url,page_url,normalized_url,page_type,parent_url,link_text,depth,status,http_status,document_found,pagination_detected,pagination_pages_checked,pagination_limit_reached,error_message,discovered_at,processed_at'.split(',')
+        cols='seed_url,page_url,normalized_url,page_type,parent_url,link_text,depth,status,http_status,document_found,pagination_detected,pagination_pages_checked,pagination_limit_reached,document_url,document_source,error_message,discovered_at,processed_at'.split(',')
         rows=self.db.execute('SELECT '+','.join(cols)+' FROM pages ORDER BY discovered_order').fetchall()
         with open('classified_pages.csv','w',newline='',encoding='utf-8-sig') as f:w=csv.DictWriter(f,fieldnames=cols);w.writeheader();w.writerows(dict(r) for r in rows)
         with open('pdf_pages.csv','w',newline='',encoding='utf-8-sig') as f:w=csv.writer(f);w.writerow(['source_url']);w.writerows([[r['normalized_url']] for r in rows if r['page_type']=='PDF'])
         with open('html_pages.csv','w',newline='',encoding='utf-8-sig') as f:w=csv.writer(f);w.writerow(['source_url','parent_url','depth']);w.writerows([[r['normalized_url'],r['parent_url'],r['depth']] for r in rows if r['page_type']=='HTML'])
         with open('failed_pages.csv','w',newline='',encoding='utf-8-sig') as f:w=csv.writer(f);w.writerow(['source_url','parent_url','depth','http_status','error_message']);w.writerows([[r['normalized_url'],r['parent_url'],r['depth'],r['http_status'],r['error_message']] for r in rows if r['status']=='FAILED'])
+        with open('document_evidence.csv','w',newline='',encoding='utf-8-sig') as f:w=csv.writer(f);w.writerow(['source_url','document_url','detection_source']);w.writerows(self.db.execute('SELECT source_url,document_url,detection_source FROM document_evidence ORDER BY id'))
     def summary(self):
         c=dict(self.db.execute('SELECT status,COUNT(*) FROM pages GROUP BY status'));t=dict(self.db.execute('SELECT page_type,COUNT(*) FROM pages GROUP BY page_type'));total=self.db.execute('SELECT COUNT(*) FROM pages').fetchone()[0]
         logging.info('FINAL seed=%s discovered=%s processed=%s PDF=%s HTML=%s failed=%s skipped=%s duplicates=%s pagination=%s pagination_limits=%s pagination_states=%s load_more=%s max_depth=%s page_limit=%s runtime_limit=%s runtime_seconds=%.1f',self.seed,total,c.get('PROCESSED',0),t.get('PDF',0),t.get('HTML',0),c.get('FAILED',0),c.get('SKIPPED',0),self.stats['duplicates'],self.stats['pagination_detected'],self.stats['pagination_limits'],self.stats['pagination_states'],self.stats['load_more'],self.stats['max_depth'],self.page_limit,self.runtime_limit,time.monotonic()-self.started)
