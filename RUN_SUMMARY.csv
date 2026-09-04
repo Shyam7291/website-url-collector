@@ -1,4 +1,5 @@
-run_date,seed_url,discovered,processed,pdf_pages,html_pages,failed_pages,skipped_pages
-2026-09-04 09:48:24 UTC,https://www.arcelikglobal.com/en/,125,10,4,6,0,115
-2026-09-04 10:13:46 UTC,https://www.arcelikglobal.com/en/,1264,200,103,97,0,1064
-2026-09-04 10:34:14 UTC,https://www.arcelikglobal.com/en/,826,192,94,98,3,631
+run_date,seed_url,max_pages_requested,discovered,processed,pdf_pages,html_pages,failed_pages,skipped_pages,remaining_discovered,stop_reason,crawl_complete,page_limit_reached,runtime_limit_reached,max_depth_reached
+2026-09-04 09:48:24 UTC,https://www.arcelikglobal.com/en/,unknown,125,10,4,6,0,115,,LEGACY_RUN,unknown,,,
+2026-09-04 10:13:46 UTC,https://www.arcelikglobal.com/en/,unknown,1264,200,103,97,0,1064,,LEGACY_RUN,unknown,,,
+2026-09-04 10:34:14 UTC,https://www.arcelikglobal.com/en/,unknown,826,192,94,98,3,631,,LEGACY_RUN,unknown,,,
+2026-09-04 14:55:46 UTC,https://www.arcelikglobal.com/en/,200,826,192,94,98,3,631,0,QUEUE_EXHAUSTED,true,false,false,4
