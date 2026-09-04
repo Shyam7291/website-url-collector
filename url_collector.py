@@ -35,6 +35,7 @@ class Config:
     delay_between_pages_seconds:float=0.35; max_retries:int=2; max_runtime_minutes:int=170
     crawl_subdomains:bool=True; stabilization_seconds:float=0.6
     restrict_to_seed_language:bool=True; export_checkpoint_pages:int=25
+    block_heavy_resources:bool=True; document_head_timeout_seconds:int=4
     keep_meaningful_query_parameters:tuple=('year','page','category','type','section')
     remove_query_parameters:tuple=('utm_source','utm_medium','utm_campaign','utm_term','utm_content','fbclid','gclid')
     allowed_hosts:tuple=()
@@ -46,7 +47,7 @@ class Config:
             if k not in names: raw.pop(k)
             elif isinstance(getattr(cls(),k),tuple): raw[k]=tuple(raw[k])
         c=cls(**raw)
-        mapping={'max_pagination_pages':('MAX_PAGINATION_PAGES',int),'max_load_more_clicks':('MAX_LOAD_MORE_CLICKS',int),'max_year_options':('MAX_YEAR_OPTIONS',int),'max_depth':('MAX_DEPTH',int),'max_pages_per_website':('MAX_PAGES',int),'page_timeout_seconds':('PAGE_TIMEOUT_SECONDS',int),'delay_between_pages_seconds':('DELAY_BETWEEN_PAGES_SECONDS',float),'max_retries':('MAX_RETRIES',int),'max_runtime_minutes':('MAX_RUNTIME_MINUTES',int),'crawl_subdomains':('CRAWL_SUBDOMAINS',bool),'restrict_to_seed_language':('RESTRICT_TO_SEED_LANGUAGE',bool),'export_checkpoint_pages':('EXPORT_CHECKPOINT_PAGES',int)}
+        mapping={'max_pagination_pages':('MAX_PAGINATION_PAGES',int),'max_load_more_clicks':('MAX_LOAD_MORE_CLICKS',int),'max_year_options':('MAX_YEAR_OPTIONS',int),'max_depth':('MAX_DEPTH',int),'max_pages_per_website':('MAX_PAGES',int),'page_timeout_seconds':('PAGE_TIMEOUT_SECONDS',int),'delay_between_pages_seconds':('DELAY_BETWEEN_PAGES_SECONDS',float),'max_retries':('MAX_RETRIES',int),'max_runtime_minutes':('MAX_RUNTIME_MINUTES',int),'crawl_subdomains':('CRAWL_SUBDOMAINS',bool),'restrict_to_seed_language':('RESTRICT_TO_SEED_LANGUAGE',bool),'export_checkpoint_pages':('EXPORT_CHECKPOINT_PAGES',int),'block_heavy_resources':('BLOCK_HEAVY_RESOURCES',bool),'document_head_timeout_seconds':('DOCUMENT_HEAD_TIMEOUT_SECONDS',int)}
         for a,(e,t) in mapping.items(): setattr(c,a,env(e,getattr(c,a),t))
         c.max_pagination_pages=max(1,c.max_pagination_pages); return c
 
@@ -58,6 +59,7 @@ class Collector:
         match=re.match(r'^/([a-z]{2}(?:-[a-z]{2})?)(?:/|$)',seed_path,re.I)
         self.language_prefix=('/'+match.group(1).lower()+'/') if match else None
         self.processed_since_export=0
+        self.document_cache={}
         self.started=time.monotonic(); self.stop=False; self.page_limit=False; self.runtime_limit=False
         self.stats=dict(duplicates=0,pagination_detected=0,pagination_limits=0,pagination_states=0,load_more=0,max_depth=0)
         self.db=sqlite3.connect('crawler.db'); self.db.row_factory=sqlite3.Row; self.init_db()
@@ -126,17 +128,23 @@ class Collector:
             for role in ('button','link'):
                 loc=p.get_by_role(role).filter(has_text=COOKIE)
                 for i in range(min(await loc.count(),8)):
-                    if await loc.nth(i).is_visible():await loc.nth(i).click(timeout=1500);return
+                    if await loc.nth(i).is_visible():
+                        await loc.nth(i).click(timeout=1200);return True
         except PWError:pass
+        return False
     async def reveal(self,p):
+        clicked=False
         try:
-            loc=p.locator("button:not([type=submit]),[role=button]")
-            for i in range(min(await loc.count(),40)):
-                el=loc.nth(i); text=((await el.inner_text(timeout=500)) or await el.get_attribute('aria-label') or '').strip()
+            # Homepage may reveal global navigation. Deeper pages prioritize content controls.
+            selector="button:not([type=submit]),[role=button]" if p.url.rstrip('/')==self.seed.rstrip('/') else "main button:not([type=submit]),main [role=button],article button:not([type=submit]),[role=main] button:not([type=submit])"
+            loc=p.locator(selector)
+            for i in range(min(await loc.count(),30)):
+                el=loc.nth(i); text=((await el.inner_text(timeout=350)) or await el.get_attribute('aria-label') or '').strip()
                 if text and REVEAL.search(text) and await el.is_visible() and await el.get_attribute('aria-expanded')=='false':
-                    try:await el.click(timeout=1000)
+                    try:await el.click(timeout=800);clicked=True
                     except PWError:pass
         except PWError:pass
+        return clicked
     async def links(self,p):
         """All links are used for child-page discovery."""
         out=[];seen=set()
@@ -169,11 +177,15 @@ class Collector:
                 if u and u not in seen:seen.add(u);out.append((u,t[:500],src))
         return out
     async def confirm(self,ctx,u):
-        if ext(u) in DOC_EXT:return True
+        if u in self.document_cache:return self.document_cache[u]
+        if ext(u) in DOC_EXT:self.document_cache[u]=True;return True
+        found=False
         try:
-            r=await ctx.request.head(u,timeout=10000,fail_on_status_code=False); ct=r.headers.get('content-type','').lower();cd=r.headers.get('content-disposition','').lower()
-            return any(x in ct for x in DOC_MIME) or 'attachment' in cd
-        except PWError:return False
+            r=await ctx.request.head(u,timeout=self.cfg.document_head_timeout_seconds*1000,fail_on_status_code=False)
+            ct=r.headers.get('content-type','').lower();cd=r.headers.get('content-disposition','').lower()
+            found=any(x in ct for x in DOC_MIME) or 'attachment' in cd
+        except PWError:pass
+        self.document_cache[u]=found;return found
     def is_pagination(self,candidate,parent,text=''):
         q=dict(parse_qsl(urlsplit(candidate).query))
         if any(k.lower() in PKEYS for k in q) and self.norm(candidate,parent_view=True)==self.norm(parent,parent_view=True):return True
@@ -221,7 +233,10 @@ class Collector:
                 if status and status>=400:raise RuntimeError(f'HTTP status {status}')
                 ct=(await r.all_headers()).get('content-type','').lower() if r else ''
                 if ct and 'text/html' not in ct and 'application/xhtml' not in ct:raise RuntimeError(f'Unexpected content type {ct}')
-                await self.settle(p);await self.cookie(p);await self.reveal(p);await self.settle(p)
+                await self.settle(p)
+                interacted=await self.cookie(p)
+                interacted=(await self.reveal(p)) or interacted
+                if interacted:await self.settle(p)
                 found,links,document_url,document_source=await self.scan(p,ctx,u,depth,response_docs);checked=1;pdet=0;limit=0
                 cands=self.page2_candidates(links,u)
                 if cands and self.cfg.max_pagination_pages>1:
@@ -263,7 +278,10 @@ class Collector:
                 self.db.commit();logging.info('Classified %s %s evidence=%s','PDF' if found else 'HTML',u,document_url or 'none');await p.close();return
             except (PWError,PWTimeout,RuntimeError) as e:
                 last=f'{type(e).__name__}: {e}'[:2000];logging.warning('Attempt failed %s %s',u,last);await p.close()
-                if attempt<=self.cfg.max_retries:await asyncio.sleep(min(2**attempt,10))
+                permanent_4xx=status is not None and 400<=status<500 and status not in (408,429)
+                if permanent_4xx:
+                    logging.info('Permanent HTTP %s; retries skipped for %s',status,u);break
+                if attempt<=self.cfg.max_retries:await asyncio.sleep(min(2**attempt,6))
         order=self.db.execute('SELECT COALESCE(MAX(processed_order),0)+1 FROM pages').fetchone()[0]
         self.db.execute("UPDATE pages SET status='FAILED',page_type='FAILED',http_status=?,processed_order=?,processed_at=?,error_message=? WHERE id=?",(status,order,now(),last,row['id']));self.db.commit()
     def export(self):
@@ -281,6 +299,11 @@ class Collector:
         self.add(self.seed,None,'Home',0)
         async with async_playwright() as pw:
             b=await pw.chromium.launch(headless=True,args=['--disable-dev-shm-usage']);ctx=await b.new_context(ignore_https_errors=True,accept_downloads=False,user_agent='Mozilla/5.0 (compatible; WebsiteURLCollector/1.0)');ctx.set_default_timeout(self.cfg.page_timeout_seconds*1000)
+            if self.cfg.block_heavy_resources:
+                async def block_heavy(route):
+                    if route.request.resource_type in ('image','media','font'):await route.abort()
+                    else:await route.continue_()
+                await ctx.route('**/*',block_heavy)
             try:
                 while not self.expired():
                     row=self.next()
