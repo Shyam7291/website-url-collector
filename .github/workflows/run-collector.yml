@@ -43,6 +43,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -61,8 +63,9 @@ jobs:
       - name: Run collector
         run: python url_collector.py
 
-      - name: Ensure result files exist
+      - name: Ensure generated result files exist
         if: ${{ always() }}
+        shell: bash
         run: |
           touch classified_pages.csv
           touch pdf_pages.csv
@@ -72,29 +75,29 @@ jobs:
           touch crawler.db
           touch collector.log
 
-      - name: Create RESULTS file and Actions summary
+      - name: Update repository CSV tables
         if: ${{ always() }}
-        shell: bash
-        run: |
-          ACTIONS_SUMMARY="$GITHUB_STEP_SUMMARY"
-          GITHUB_STEP_SUMMARY="RESULTS.md" python github_summary.py
-          cat RESULTS.md >> "$ACTIONS_SUMMARY"
+        run: python repository_results.py
 
-      - name: Commit latest RESULTS file
+      - name: Create Actions run summary
+        if: ${{ always() }}
+        run: python github_summary.py
+
+      - name: Commit RUN_SUMMARY and PDF_PAGES
         if: ${{ always() }}
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add RESULTS.md
+          git add RUN_SUMMARY.csv PDF_PAGES.csv
           if git diff --cached --quiet; then
-            echo "RESULTS.md has no changes to commit."
+            echo "Repository result tables have no changes to commit."
           else
-            git commit -m "Update website collector results"
+            git commit -m "Update website collector result tables"
             git push
           fi
 
-      - name: Upload collector results
+      - name: Upload collector backup artifact
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
@@ -107,6 +110,7 @@ jobs:
             document_evidence.csv
             crawler.db
             collector.log
-            RESULTS.md
+            RUN_SUMMARY.csv
+            PDF_PAGES.csv
           if-no-files-found: warn
           retention-days: 30
