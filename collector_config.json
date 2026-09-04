@@ -5,6 +5,8 @@
   "max_depth": 12,
   "max_pages_per_website": 3000,
   "page_timeout_seconds": 30,
+  "page_attempt_timeout_seconds": 60,
+  "page_close_timeout_seconds": 5,
   "delay_between_pages_seconds": 0.15,
   "max_retries": 2,
   "max_runtime_minutes": 170,
