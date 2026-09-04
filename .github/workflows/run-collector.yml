@@ -67,13 +67,9 @@ jobs:
         if: ${{ always() }}
         shell: bash
         run: |
-          touch classified_pages.csv
-          touch pdf_pages.csv
-          touch html_pages.csv
-          touch failed_pages.csv
-          touch document_evidence.csv
-          touch crawler.db
-          touch collector.log
+          touch classified_pages.csv pdf_pages.csv html_pages.csv
+          touch failed_pages.csv document_evidence.csv crawler.db collector.log
+          touch PERFORMANCE_REPORT.csv
 
       - name: Update repository CSV tables
         if: ${{ always() }}
@@ -83,17 +79,17 @@ jobs:
         if: ${{ always() }}
         run: python github_summary.py
 
-      - name: Commit RUN_SUMMARY and PDF_PAGES
+      - name: Commit repository result tables
         if: ${{ always() }}
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add RUN_SUMMARY.csv PDF_PAGES.csv
+          git add RUN_SUMMARY.csv PDF_PAGES.csv PERFORMANCE_REPORT.csv
           if git diff --cached --quiet; then
             echo "Repository result tables have no changes to commit."
           else
-            git commit -m "Update website collector result tables"
+            git commit -m "Update website collector reports"
             git push
           fi
 
@@ -112,5 +108,6 @@ jobs:
             collector.log
             RUN_SUMMARY.csv
             PDF_PAGES.csv
+            PERFORMANCE_REPORT.csv
           if-no-files-found: warn
           retention-days: 30
