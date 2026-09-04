@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+classified_pages.csv
+pdf_pages.csv
+html_pages.csv
+failed_pages.csv
+crawler.db*
+collector.log
