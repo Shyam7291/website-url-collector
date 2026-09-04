@@ -59,7 +59,11 @@ jobs:
 
       - name: Ensure artifact paths exist
         if: ${{ always() }}
-        run: touch classified_pages.csv pdf_pages.csv html_pages.csv failed_pages.csv crawler.db collector.log
+        run: touch classified_pages.csv pdf_pages.csv html_pages.csv failed_pages.csv document_evidence.csv crawler.db collector.log
+
+      - name: Create GitHub results summary
+        if: ${{ always() }}
+        run: python github_summary.py
 
       - name: Upload collector results
         if: ${{ always() }}
@@ -71,6 +75,7 @@ jobs:
             pdf_pages.csv
             html_pages.csv
             failed_pages.csv
+            document_evidence.csv
             crawler.db
             collector.log
           if-no-files-found: warn
