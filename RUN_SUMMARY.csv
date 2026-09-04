@@ -3,3 +3,4 @@ run_date,seed_url,max_pages_requested,discovered,processed,pdf_pages,html_pages,
 2026-09-04 10:13:46 UTC,https://www.arcelikglobal.com/en/,unknown,1264,200,103,97,0,1064,,LEGACY_RUN,unknown,,,
 2026-09-04 10:34:14 UTC,https://www.arcelikglobal.com/en/,unknown,826,192,94,98,3,631,,LEGACY_RUN,unknown,,,
 2026-09-04 14:55:46 UTC,https://www.arcelikglobal.com/en/,200,826,192,94,98,3,631,0,QUEUE_EXHAUSTED,true,false,false,4
+2026-09-04 15:25:32 UTC,https://www.arcelikglobal.com/en/,200,1,0,0,0,1,0,0,QUEUE_EXHAUSTED,true,false,false,0

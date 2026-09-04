@@ -1,1 +1,3 @@
-source_url,page_type,http_status,total_seconds,navigation_seconds,stabilization_seconds,interaction_seconds,link_scan_seconds,document_check_seconds,pagination_seconds,load_more_seconds,retry_count
+﻿source_url,page_type,http_status,total_seconds,navigation_seconds,stabilization_seconds,interaction_seconds,scan_seconds,other_seconds,retry_count
+https://www.arcelikglobal.com/en/,FAILED,,6.12732237299997,2.160979222998776,0.0,0.0,0.0,3.966343150001194,2
+TOTAL,,,6.127,2.161,0.000,0.000,0.000,3.966,
