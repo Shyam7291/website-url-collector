@@ -60,6 +60,9 @@ class Collector:
         self.language_prefix=('/'+match.group(1).lower()+'/') if match else None
         self.processed_since_export=0
         self.document_cache={}
+        self.current_perf=None
+        self.run_delay_seconds=0.0
+        self.run_export_seconds=0.0
         self.started=time.monotonic(); self.stop=False; self.page_limit=False; self.runtime_limit=False
         self.stats=dict(duplicates=0,pagination_detected=0,pagination_limits=0,pagination_states=0,load_more=0,max_depth=0)
         self.db=sqlite3.connect('crawler.db'); self.db.row_factory=sqlite3.Row; self.init_db()
@@ -103,6 +106,7 @@ class Collector:
         CREATE TABLE IF NOT EXISTS pages(id INTEGER PRIMARY KEY AUTOINCREMENT,seed_url TEXT NOT NULL,page_url TEXT NOT NULL,normalized_url TEXT NOT NULL UNIQUE,parent_url TEXT,link_text TEXT,depth INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'DISCOVERED',page_type TEXT,document_found INTEGER NOT NULL DEFAULT 0,http_status INTEGER,pagination_detected INTEGER NOT NULL DEFAULT 0,pagination_pages_checked INTEGER NOT NULL DEFAULT 1,pagination_limit_reached INTEGER NOT NULL DEFAULT 0,document_url TEXT,document_source TEXT,discovered_order INTEGER,processed_order INTEGER,discovered_at TEXT,processed_at TEXT,error_message TEXT);
         CREATE TABLE IF NOT EXISTS links(id INTEGER PRIMARY KEY AUTOINCREMENT,from_url TEXT NOT NULL,to_url TEXT NOT NULL,normalized_to_url TEXT NOT NULL,link_text TEXT,discovered_at TEXT,UNIQUE(from_url,normalized_to_url));
         CREATE TABLE IF NOT EXISTS document_evidence(id INTEGER PRIMARY KEY AUTOINCREMENT,source_url TEXT NOT NULL,document_url TEXT NOT NULL,detection_source TEXT NOT NULL,detected_at TEXT NOT NULL,UNIQUE(source_url,document_url));
+        CREATE TABLE IF NOT EXISTS performance(id INTEGER PRIMARY KEY AUTOINCREMENT,source_url TEXT NOT NULL,page_type TEXT,http_status INTEGER,total_seconds REAL,navigation_seconds REAL,stabilization_seconds REAL,interaction_seconds REAL,scan_seconds REAL,other_seconds REAL,retry_count INTEGER,recorded_at TEXT);
         """); self.db.commit()
     def add(self,u,parent,text,depth):
         n=self.norm(u,parent or self.seed)
@@ -122,7 +126,22 @@ class Collector:
     def expired(self):
         if time.monotonic()-self.started>=self.cfg.max_runtime_minutes*60:self.runtime_limit=True;self.stop=True
         return self.stop
-    async def settle(self,p):await p.wait_for_timeout(int(self.cfg.stabilization_seconds*1000))
+    async def settle(self,p):
+        started=time.perf_counter();await p.wait_for_timeout(int(self.cfg.stabilization_seconds*1000))
+        if self.current_perf is not None:self.current_perf['stabilization']+=time.perf_counter()-started
+    async def timed_goto(self,p,u):
+        started=time.perf_counter()
+        try:return await self.timed_goto(p,u)
+        finally:
+            if self.current_perf is not None:self.current_perf['navigation']+=time.perf_counter()-started
+    def record_perf(self,u,page_type,status,started,retry_count):
+        perf=self.current_perf or {'navigation':0.0,'stabilization':0.0,'interaction':0.0,'scan':0.0}
+        total=time.perf_counter()-started
+        known=perf['navigation']+perf['stabilization']+perf['interaction']+perf['scan']
+        other=max(0.0,total-known)
+        self.db.execute('INSERT INTO performance(source_url,page_type,http_status,total_seconds,navigation_seconds,stabilization_seconds,interaction_seconds,scan_seconds,other_seconds,retry_count,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(u,page_type,status,total,perf['navigation'],perf['stabilization'],perf['interaction'],perf['scan'],other,retry_count,now()))
+        self.db.commit()
+
     async def cookie(self,p):
         try:
             for role in ('button','link'):
@@ -190,6 +209,11 @@ class Collector:
         q=dict(parse_qsl(urlsplit(candidate).query))
         if any(k.lower() in PKEYS for k in q) and self.norm(candidate,parent_view=True)==self.norm(parent,parent_view=True):return True
         return bool(NEXT.match(text.strip()) and urlsplit(candidate).path.rstrip('/')==urlsplit(parent).path.rstrip('/'))
+    async def timed_scan(self,p,ctx,parent,depth,response_docs):
+        started=time.perf_counter()
+        try:return await self.scan(p,ctx,parent,depth,response_docs)
+        finally:
+            if self.current_perf is not None:self.current_perf['scan']+=time.perf_counter()-started
     async def scan(self,p,ctx,parent,depth,response_docs):
         all_links=await self.links(p);found=False;document_url=None;document_source=None
         for u,_,src in await self.content_document_links(p):
@@ -219,6 +243,7 @@ class Collector:
         except PWError:return hashlib.sha256(p.url.encode()).hexdigest()
     async def process(self,ctx,row):
         u=row['normalized_url'];depth=row['depth'];self.stats['max_depth']=max(depth,self.stats['max_depth'])
+        page_started=time.perf_counter();self.current_perf={'navigation':0.0,'stabilization':0.0,'interaction':0.0,'scan':0.0}
         self.db.execute("UPDATE pages SET status='PROCESSING' WHERE id=?",(row['id'],));self.db.commit();last='';status=None
         for attempt in range(1,self.cfg.max_retries+2):
             p=await ctx.new_page();response_docs=set()
@@ -229,24 +254,26 @@ class Collector:
                 except PWError:pass
             p.on('response',response)
             try:
-                logging.info('Opening %s attempt %s',u,attempt);r=await p.goto(u,wait_until='domcontentloaded',timeout=self.cfg.page_timeout_seconds*1000);status=r.status if r else None
+                logging.info('Opening %s attempt %s',u,attempt);r=await self.timed_goto(p,u);status=r.status if r else None
                 if status and status>=400:raise RuntimeError(f'HTTP status {status}')
                 ct=(await r.all_headers()).get('content-type','').lower() if r else ''
                 if ct and 'text/html' not in ct and 'application/xhtml' not in ct:raise RuntimeError(f'Unexpected content type {ct}')
                 await self.settle(p)
+                interaction_started=time.perf_counter()
                 interacted=await self.cookie(p)
                 interacted=(await self.reveal(p)) or interacted
+                self.current_perf['interaction']+=time.perf_counter()-interaction_started
                 if interacted:await self.settle(p)
-                found,links,document_url,document_source=await self.scan(p,ctx,u,depth,response_docs);checked=1;pdet=0;limit=0
+                found,links,document_url,document_source=await self.timed_scan(p,ctx,u,depth,response_docs);checked=1;pdet=0;limit=0
                 cands=self.page2_candidates(links,u)
                 if cands and self.cfg.max_pagination_pages>1:
                     pdet=1;self.stats['pagination_detected']+=1;sig=await self.signature(p)
-                    await p.goto(cands[0][0],wait_until='domcontentloaded',timeout=self.cfg.page_timeout_seconds*1000);await self.settle(p)
+                    await self.timed_goto(p,cands[0][0]);await self.settle(p)
                     if await self.signature(p)!=sig:
-                        checked=2;self.stats['pagination_states']+=1;f2,l2,d2,s2=await self.scan(p,ctx,u,depth,response_docs);found|=f2
+                        checked=2;self.stats['pagination_states']+=1;f2,l2,d2,s2=await self.timed_scan(p,ctx,u,depth,response_docs);found|=f2
                         if f2 and not document_url:document_url,document_source=d2,s2
                         if self.page2_candidates(l2,u):limit=1
-                    await p.goto(u,wait_until='domcontentloaded',timeout=self.cfg.page_timeout_seconds*1000);await self.settle(p)
+                    await self.timed_goto(p,u);await self.settle(p)
                 elif cands:pdet=limit=1;self.stats['pagination_detected']+=1
                 if checked==1 and self.cfg.max_pagination_pages>1:
                     try:
@@ -257,7 +284,7 @@ class Collector:
                                 sig=await self.signature(p);await el.click(timeout=3000);await self.settle(p);pdet=1;self.stats['pagination_detected']+=1
                                 if await self.signature(p)!=sig:
                                     checked=2;self.stats['pagination_states']+=1
-                                    f2,_,d2,s2=await self.scan(p,ctx,u,depth,response_docs);found|=f2
+                                    f2,_,d2,s2=await self.timed_scan(p,ctx,u,depth,response_docs);found|=f2
                                     if f2 and not document_url:document_url,document_source=d2,s2
                                 break
                     except PWError:pass
@@ -268,14 +295,14 @@ class Collector:
                             sig=await self.signature(p);await b.click(timeout=3000);await self.settle(p)
                             if await self.signature(p)!=sig:
                                 self.stats['load_more']+=1
-                                fm,_,dm,sm=await self.scan(p,ctx,u,depth,response_docs);found|=fm
+                                fm,_,dm,sm=await self.timed_scan(p,ctx,u,depth,response_docs);found|=fm
                                 if fm and not document_url:document_url,document_source=dm,sm
                     except PWError:pass
                 if limit:self.stats['pagination_limits']+=1
                 order=self.db.execute('SELECT COALESCE(MAX(processed_order),0)+1 FROM pages').fetchone()[0]
                 self.db.execute("UPDATE pages SET status='PROCESSED',page_type=?,document_found=?,http_status=?,pagination_detected=?,pagination_pages_checked=?,pagination_limit_reached=?,document_url=?,document_source=?,processed_order=?,processed_at=?,error_message=NULL WHERE id=?",('PDF' if found else 'HTML',int(found),status,pdet,checked,limit,document_url,document_source,order,now(),row['id']))
                 if found and document_url:self.db.execute('INSERT OR IGNORE INTO document_evidence(source_url,document_url,detection_source,detected_at) VALUES(?,?,?,?)',(u,document_url,document_source,now()))
-                self.db.commit();logging.info('Classified %s %s evidence=%s','PDF' if found else 'HTML',u,document_url or 'none');await p.close();return
+                self.db.commit();page_type='PDF' if found else 'HTML';logging.info('Classified %s %s evidence=%s',page_type,u,document_url or 'none');await p.close();self.record_perf(u,page_type,status,page_started,attempt-1);self.current_perf=None;return
             except (PWError,PWTimeout,RuntimeError) as e:
                 last=f'{type(e).__name__}: {e}'[:2000];logging.warning('Attempt failed %s %s',u,last);await p.close()
                 permanent_4xx=status is not None and 400<=status<500 and status not in (408,429)
@@ -284,6 +311,7 @@ class Collector:
                 if attempt<=self.cfg.max_retries:await asyncio.sleep(min(2**attempt,6))
         order=self.db.execute('SELECT COALESCE(MAX(processed_order),0)+1 FROM pages').fetchone()[0]
         self.db.execute("UPDATE pages SET status='FAILED',page_type='FAILED',http_status=?,processed_order=?,processed_at=?,error_message=? WHERE id=?",(status,order,now(),last,row['id']));self.db.commit()
+        self.record_perf(u,'FAILED',status,page_started,self.cfg.max_retries);self.current_perf=None
     def export(self):
         cols='seed_url,page_url,normalized_url,page_type,parent_url,link_text,depth,status,http_status,document_found,pagination_detected,pagination_pages_checked,pagination_limit_reached,document_url,document_source,error_message,discovered_at,processed_at'.split(',')
         rows=self.db.execute('SELECT '+','.join(cols)+' FROM pages ORDER BY discovered_order').fetchall()
@@ -292,9 +320,17 @@ class Collector:
         with open('html_pages.csv','w',newline='',encoding='utf-8-sig') as f:w=csv.writer(f);w.writerow(['source_url','parent_url','depth']);w.writerows([[r['normalized_url'],r['parent_url'],r['depth']] for r in rows if r['page_type']=='HTML'])
         with open('failed_pages.csv','w',newline='',encoding='utf-8-sig') as f:w=csv.writer(f);w.writerow(['source_url','parent_url','depth','http_status','error_message']);w.writerows([[r['normalized_url'],r['parent_url'],r['depth'],r['http_status'],r['error_message']] for r in rows if r['status']=='FAILED'])
         with open('document_evidence.csv','w',newline='',encoding='utf-8-sig') as f:w=csv.writer(f);w.writerow(['source_url','document_url','detection_source']);w.writerows(self.db.execute('SELECT source_url,document_url,detection_source FROM document_evidence ORDER BY id'))
+        perf_cols=['source_url','page_type','http_status','total_seconds','navigation_seconds','stabilization_seconds','interaction_seconds','scan_seconds','other_seconds','retry_count']
+        perf_rows=self.db.execute('SELECT '+','.join(perf_cols)+' FROM performance ORDER BY id').fetchall()
+        with open('PERFORMANCE_REPORT.csv','w',newline='',encoding='utf-8-sig') as f:
+            w=csv.writer(f);w.writerow(perf_cols);w.writerows([[r[c] for c in perf_cols] for r in perf_rows])
+            if perf_rows:
+                totals=[sum(float(r[c] or 0) for r in perf_rows) for c in perf_cols[3:9]]
+                w.writerow(['TOTAL','','',*['%.3f'%x for x in totals],''])
+
     def summary(self):
         c=dict(self.db.execute('SELECT status,COUNT(*) FROM pages GROUP BY status'));t=dict(self.db.execute('SELECT page_type,COUNT(*) FROM pages GROUP BY page_type'));total=self.db.execute('SELECT COUNT(*) FROM pages').fetchone()[0]
-        logging.info('FINAL seed=%s discovered=%s processed=%s PDF=%s HTML=%s failed=%s skipped=%s duplicates=%s pagination=%s pagination_limits=%s pagination_states=%s load_more=%s max_depth=%s page_limit=%s runtime_limit=%s runtime_seconds=%.1f',self.seed,total,c.get('PROCESSED',0),t.get('PDF',0),t.get('HTML',0),c.get('FAILED',0),c.get('SKIPPED',0),self.stats['duplicates'],self.stats['pagination_detected'],self.stats['pagination_limits'],self.stats['pagination_states'],self.stats['load_more'],self.stats['max_depth'],self.page_limit,self.runtime_limit,time.monotonic()-self.started)
+        logging.info('FINAL seed=%s discovered=%s processed=%s PDF=%s HTML=%s failed=%s skipped=%s duplicates=%s pagination=%s pagination_limits=%s pagination_states=%s load_more=%s max_depth=%s page_limit=%s runtime_limit=%s runtime_seconds=%.1f configured_delay_seconds=%.1f export_seconds=%.1f',self.seed,total,c.get('PROCESSED',0),t.get('PDF',0),t.get('HTML',0),c.get('FAILED',0),c.get('SKIPPED',0),self.stats['duplicates'],self.stats['pagination_detected'],self.stats['pagination_limits'],self.stats['pagination_states'],self.stats['load_more'],self.stats['max_depth'],self.page_limit,self.runtime_limit,time.monotonic()-self.started,self.run_delay_seconds,self.run_export_seconds)
     async def run(self):
         self.add(self.seed,None,'Home',0)
         async with async_playwright() as pw:
@@ -309,8 +345,9 @@ class Collector:
                     row=self.next()
                     if not row:break
                     await self.process(ctx,row);self.processed_since_export+=1
-                    if self.processed_since_export>=self.cfg.export_checkpoint_pages:self.export();self.processed_since_export=0
-                    await asyncio.sleep(self.cfg.delay_between_pages_seconds)
+                    if self.processed_since_export>=self.cfg.export_checkpoint_pages:
+                        export_started=time.perf_counter();self.export();self.run_export_seconds+=time.perf_counter()-export_started;self.processed_since_export=0
+                    delay_started=time.perf_counter();await asyncio.sleep(self.cfg.delay_between_pages_seconds);self.run_delay_seconds+=time.perf_counter()-delay_started
             finally:await ctx.close();await b.close()
 
 def seed_value(manual,path):
