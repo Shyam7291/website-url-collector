@@ -1,0 +1,30 @@
+{
+  "max_pagination_pages": 2,
+  "max_load_more_clicks": 1,
+  "max_year_options": 2,
+  "max_depth": 12,
+  "max_pages_per_website": 3000,
+  "page_timeout_seconds": 45,
+  "delay_between_pages_seconds": 1.5,
+  "max_retries": 2,
+  "max_runtime_minutes": 170,
+  "crawl_subdomains": true,
+  "stabilization_seconds": 2.0,
+  "keep_meaningful_query_parameters": [
+    "year",
+    "page",
+    "category",
+    "type",
+    "section"
+  ],
+  "remove_query_parameters": [
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+    "fbclid",
+    "gclid"
+  ],
+  "allowed_hosts": []
+}
