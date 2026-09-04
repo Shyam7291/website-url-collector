@@ -131,7 +131,7 @@ class Collector:
         if self.current_perf is not None:self.current_perf['stabilization']+=time.perf_counter()-started
     async def timed_goto(self,p,u):
         started=time.perf_counter()
-        try:return await self.timed_goto(p,u)
+        try:return await p.goto(u,wait_until='domcontentloaded',timeout=self.cfg.page_timeout_seconds*1000)
         finally:
             if self.current_perf is not None:self.current_perf['navigation']+=time.perf_counter()-started
     def record_perf(self,u,page_type,status,started,retry_count):
