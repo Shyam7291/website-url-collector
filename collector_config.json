@@ -12,6 +12,8 @@
   "stabilization_seconds": 0.6,
   "restrict_to_seed_language": true,
   "export_checkpoint_pages": 25,
+  "block_heavy_resources": true,
+  "document_head_timeout_seconds": 4,
   "keep_meaningful_query_parameters": [
     "year",
     "page",
