@@ -1,1 +1,2 @@
-run_date,seed_url,discovered,processed,pdf_pages,html_pages,failed_pages,skipped_pages,duplicate_discoveries,max_depth,page_limit_reached,runtime_limit_reached,runtime_seconds
+run_date,seed_url,discovered,processed,pdf_pages,html_pages,failed_pages,skipped_pages
+2026-09-04 09:48:24 UTC,https://www.arcelikglobal.com/en/,125,10,4,6,0,115
