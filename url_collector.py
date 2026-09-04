@@ -36,6 +36,7 @@ class Config:
     crawl_subdomains:bool=True; stabilization_seconds:float=0.6
     restrict_to_seed_language:bool=True; export_checkpoint_pages:int=25
     block_heavy_resources:bool=True; document_head_timeout_seconds:int=4
+    page_attempt_timeout_seconds:int=60; page_close_timeout_seconds:int=5
     keep_meaningful_query_parameters:tuple=('year','page','category','type','section')
     remove_query_parameters:tuple=('utm_source','utm_medium','utm_campaign','utm_term','utm_content','fbclid','gclid')
     allowed_hosts:tuple=()
@@ -47,7 +48,7 @@ class Config:
             if k not in names: raw.pop(k)
             elif isinstance(getattr(cls(),k),tuple): raw[k]=tuple(raw[k])
         c=cls(**raw)
-        mapping={'max_pagination_pages':('MAX_PAGINATION_PAGES',int),'max_load_more_clicks':('MAX_LOAD_MORE_CLICKS',int),'max_year_options':('MAX_YEAR_OPTIONS',int),'max_depth':('MAX_DEPTH',int),'max_pages_per_website':('MAX_PAGES',int),'page_timeout_seconds':('PAGE_TIMEOUT_SECONDS',int),'delay_between_pages_seconds':('DELAY_BETWEEN_PAGES_SECONDS',float),'max_retries':('MAX_RETRIES',int),'max_runtime_minutes':('MAX_RUNTIME_MINUTES',int),'crawl_subdomains':('CRAWL_SUBDOMAINS',bool),'restrict_to_seed_language':('RESTRICT_TO_SEED_LANGUAGE',bool),'export_checkpoint_pages':('EXPORT_CHECKPOINT_PAGES',int),'block_heavy_resources':('BLOCK_HEAVY_RESOURCES',bool),'document_head_timeout_seconds':('DOCUMENT_HEAD_TIMEOUT_SECONDS',int)}
+        mapping={'max_pagination_pages':('MAX_PAGINATION_PAGES',int),'max_load_more_clicks':('MAX_LOAD_MORE_CLICKS',int),'max_year_options':('MAX_YEAR_OPTIONS',int),'max_depth':('MAX_DEPTH',int),'max_pages_per_website':('MAX_PAGES',int),'page_timeout_seconds':('PAGE_TIMEOUT_SECONDS',int),'delay_between_pages_seconds':('DELAY_BETWEEN_PAGES_SECONDS',float),'max_retries':('MAX_RETRIES',int),'max_runtime_minutes':('MAX_RUNTIME_MINUTES',int),'crawl_subdomains':('CRAWL_SUBDOMAINS',bool),'restrict_to_seed_language':('RESTRICT_TO_SEED_LANGUAGE',bool),'export_checkpoint_pages':('EXPORT_CHECKPOINT_PAGES',int),'block_heavy_resources':('BLOCK_HEAVY_RESOURCES',bool),'document_head_timeout_seconds':('DOCUMENT_HEAD_TIMEOUT_SECONDS',int),'page_attempt_timeout_seconds':('PAGE_ATTEMPT_TIMEOUT_SECONDS',int),'page_close_timeout_seconds':('PAGE_CLOSE_TIMEOUT_SECONDS',int)}
         for a,(e,t) in mapping.items(): setattr(c,a,env(e,getattr(c,a),t))
         c.max_pagination_pages=max(1,c.max_pagination_pages); return c
 
@@ -241,6 +242,27 @@ class Collector:
             hrefs=await p.locator('a[href]').evaluate_all("e=>e.slice(0,1000).map(a=>a.href).sort().join('\\n')")
             return hashlib.sha256((p.url+text+hrefs).encode(errors='ignore')).hexdigest()
         except PWError:return hashlib.sha256(p.url.encode()).hexdigest()
+    async def safe_close(self,p):
+        if p is None:return
+        try:await asyncio.wait_for(p.close(),timeout=self.cfg.page_close_timeout_seconds)
+        except (asyncio.TimeoutError,PWError):logging.warning('Page close timed out; continuing')
+    def progress(self,current_url):
+        done=self.db.execute("SELECT COUNT(*) FROM pages WHERE status IN ('PROCESSED','FAILED')").fetchone()[0]
+        queued=self.db.execute("SELECT COUNT(*) FROM pages WHERE status='DISCOVERED'").fetchone()[0]
+        elapsed=time.monotonic()-self.started
+        logging.info('PROGRESS completed=%s queued=%s elapsed_seconds=%.1f current_url=%s',done,queued,elapsed,current_url)
+    async def process_with_watchdog(self,ctx,row):
+        timeout=self.cfg.page_attempt_timeout_seconds*(self.cfg.max_retries+1)+15
+        try:
+            await asyncio.wait_for(self.process(ctx,row),timeout=timeout)
+        except asyncio.TimeoutError:
+            u=row['normalized_url'];logging.error('Whole-page watchdog timeout after %ss: %s',timeout,u)
+            order=self.db.execute('SELECT COALESCE(MAX(processed_order),0)+1 FROM pages').fetchone()[0]
+            self.db.execute("UPDATE pages SET status='FAILED',page_type='FAILED',processed_order=?,processed_at=?,error_message=? WHERE id=?",(order,now(),f'Whole-page watchdog timeout after {timeout}s',row['id']))
+            self.db.commit()
+            if self.current_perf is not None:
+                self.record_perf(u,'FAILED',None,time.perf_counter()-timeout,self.cfg.max_retries)
+                self.current_perf=None
     async def process(self,ctx,row):
         u=row['normalized_url'];depth=row['depth'];self.stats['max_depth']=max(depth,self.stats['max_depth'])
         page_started=time.perf_counter();self.current_perf={'navigation':0.0,'stabilization':0.0,'interaction':0.0,'scan':0.0}
@@ -302,9 +324,9 @@ class Collector:
                 order=self.db.execute('SELECT COALESCE(MAX(processed_order),0)+1 FROM pages').fetchone()[0]
                 self.db.execute("UPDATE pages SET status='PROCESSED',page_type=?,document_found=?,http_status=?,pagination_detected=?,pagination_pages_checked=?,pagination_limit_reached=?,document_url=?,document_source=?,processed_order=?,processed_at=?,error_message=NULL WHERE id=?",('PDF' if found else 'HTML',int(found),status,pdet,checked,limit,document_url,document_source,order,now(),row['id']))
                 if found and document_url:self.db.execute('INSERT OR IGNORE INTO document_evidence(source_url,document_url,detection_source,detected_at) VALUES(?,?,?,?)',(u,document_url,document_source,now()))
-                self.db.commit();page_type='PDF' if found else 'HTML';logging.info('Classified %s %s evidence=%s',page_type,u,document_url or 'none');await p.close();self.record_perf(u,page_type,status,page_started,attempt-1);self.current_perf=None;return
+                self.db.commit();page_type='PDF' if found else 'HTML';logging.info('Classified %s %s evidence=%s',page_type,u,document_url or 'none');await self.safe_close(p);self.record_perf(u,page_type,status,page_started,attempt-1);self.current_perf=None;return
             except (PWError,PWTimeout,RuntimeError) as e:
-                last=f'{type(e).__name__}: {e}'[:2000];logging.warning('Attempt failed %s %s',u,last);await p.close()
+                last=f'{type(e).__name__}: {e}'[:2000];logging.warning('Attempt failed %s %s',u,last);await self.safe_close(p)
                 permanent_4xx=status is not None and 400<=status<500 and status not in (408,429)
                 if permanent_4xx:
                     logging.info('Permanent HTTP %s; retries skipped for %s',status,u);break
@@ -344,7 +366,7 @@ class Collector:
                 while not self.expired():
                     row=self.next()
                     if not row:break
-                    await self.process(ctx,row);self.processed_since_export+=1
+                    self.progress(row['normalized_url']);await self.process_with_watchdog(ctx,row);self.processed_since_export+=1
                     if self.processed_since_export>=self.cfg.export_checkpoint_pages:
                         export_started=time.perf_counter();self.export();self.run_export_seconds+=time.perf_counter()-export_started;self.processed_since_export=0
                     delay_started=time.perf_counter();await asyncio.sleep(self.cfg.delay_between_pages_seconds);self.run_delay_seconds+=time.perf_counter()-delay_started
