@@ -16,3 +16,4 @@ run_date,seed_url,max_pages_requested,discovered,processed,pdf_pages,html_pages,
 2026-09-05 08:27:51 UTC,https://www.arcelikglobal.com/en/,200,289,143,51,92,4,142,0,QUEUE_EXHAUSTED,true,false,false,3
 2026-09-05 09:46:06 UTC,https://www.arcelikglobal.com/en/,200,234,200,66,134,1,33,0,QUEUE_EXHAUSTED,true,false,false,2
 2026-09-05 10:54:36 UTC,https://novagold.com/,200,2161,1191,320,871,548,422,0,QUEUE_EXHAUSTED,true,false,false,7
+2026-09-05 15:31:51 UTC,https://chandra-asri.com/en,500,4771,2257,517,1740,1036,1478,0,QUEUE_EXHAUSTED,true,false,false,13
