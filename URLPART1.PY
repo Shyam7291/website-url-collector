@@ -1,61 +1,30 @@
-    'photovoltaic', 'solar', 'wind-power', 'energy-efficiency', 'energy-transition', 'water',
-    'water-stewardship', 'waste', 'zero-waste', 'recycl*', 'circular-economy', 'circularity',
-    'biodiversity', 'nature', 'natural-capital', 'deforestation', 'pollution', 'social-impact',
-    'social-responsibility', 'corporate-responsibility', 'corporate-accountability', 'accountability',
-    'csr', 'community', 'community-investment', 'human-right*', 'labor-right*', 'labour-right*',
-    'modern-slavery', 'responsible-sourcing', 'responsible-supply-chain', 'supplier-code',
-    'supply-chain-standard*', 'diversity', 'inclusion', 'equity', 'dei', 'health-and-safety',
-    'occupational-health', 'employee-wellbeing', 'wellbeing', 'governance', 'ethics', 'ethical',
-    'compliance', 'code-of-conduct', 'business-conduct', 'anti-corruption', 'anti-bribery',
-    'whistleblower', 'whistleblowing', 'risk-management', 'stakeholder*', 'materiality',
-    'integrated-report*', 'sustainability-report*', 'responsibility-report*', 'annual-report*',
-    'impact-report*', 'tcfd', 'tnfd', 'sasb', 'gri', 'cdp', 'csrd', 'sfdr', 'issb', 'sdg', 'sdgs',
-    'taxonomy', 'scope-1', 'scope-2', 'scope-3', 'transition-plan', 'charter', 'disclosure*',
-)
-ESG_GATEWAY = (
-    'about', 'about-us', 'who-we-are', 'company', 'corporate', 'our-approach', 'our-commitment*',
-    'responsibility', 'policy', 'policies', 'committee', 'committees', 'board', 'leadership',
-    'resource', 'resources', 'report', 'reports', 'reporting', 'publication*', 'document*',
-    'download*', 'library', 'archive', 'centre', 'center', 'hub', 'investor*', 'esg-data',
-)
-# Pages that reliably contain no ESG documents. Exact tokens unless starred.
-NEGATIVE = (
-    'earning*', 'quarterly-result*', 'financial-result*', 'sec-filing*', 'edgar', '10-k', '10-q',
-    '8-k', '20-f', '6-k', 'proxy', 'proxy-statement', 'stock-info', 'stock-quote', 'share-price',
-    'shareprice', 'dividend*', 'analyst-coverage', 'credit-rating*', 'debt-information',
-    'bond-information', 'investor-presentation*', 'webcast*', 'transcript*', 'news', 'newsroom',
-    'news-release*', 'press', 'press-release*', 'press-room', 'media-release*', 'media-centre',
-    'media-center', 'event', 'events', 'calendar', 'conference*', 'webinar*', 'podcast*', 'stories',
-    'story', 'article', 'articles', 'blog', 'blogs', 'insight', 'insights', 'contact', 'contact-us',
-    'email-alert*', 'subscribe', 'subscription*', 'newsletter*', 'customer-support', 'support',
-    'help', 'faq', 'faqs', 'request-information', 'request-a-demo', 'demo', 'photo', 'photos',
-    'photography', 'image', 'images', 'gallery', 'galleries', 'video', 'videos', 'multimedia',
-    'audio', 'youtube', 'vimeo', 'career', 'careers', 'job', 'jobs', 'vacancies', 'recruitment',
-    'location', 'locations', 'dealer*', 'store', 'stores', 'shop', 'cart', 'checkout', 'login',
-    'logout', 'signin', 'signup', 'register', 'account', 'my-account', 'profile', 'search',
-    'share', 'print', 'privacy', 'privacy-policy', 'cookie', 'cookies', 'terms',
-    'terms-of-use', 'legal', 'disclaimer', 'accessibility', 'sitemap', 'rss', 'feed',
-)
-# Path tokens that strongly imply "this page lists documents".
-DOC_HUB = ('report', 'reports', 'reporting', 'publication*', 'document*', 'download*', 'library',
-           'archive', 'resource', 'resources', 'disclosure*', 'filing*', 'policy', 'policies',
-           'data-centre', 'data-center', 'esg-data')
+ r'|/(?:downloads?|documents?|files?|uploads?|storage|assets?/docs?|media/docs?|attachments?)(?:/|$)'
+    r'|\.ashx(?:$|[?#])|/getfile|/download\.aspx|/viewdocument)', re.I)
+# PDF.js / generic embedded-viewer wrappers: ...viewer.html?file=/x.pdf
+VIEWER_PARAMS = ('file', 'url', 'src', 'document', 'doc', 'pdf', 'href')
+UNSAFE = re.compile(r'/(?:logout|log-out|login|log-in|signin|sign-in|signup|sign-up|register|cart|'
+                    r'checkout|basket|my-?account|wp-admin|wp-login|admin|search|share|print)(?:/|$)', re.I)
+PKEYS = {'page', 'p', 'paged', 'offset', 'start', 'pagenum', 'pagenumber', 'pg', 'from', 'skip'}
+NEXT = re.compile(r'^(?:next|next page|older|older posts?|more|forward|\d{1,4}|page\s*\d{1,4})\s*'
+                  r'(?:>|>>|->|>|>>)?$', re.I)
+NEXT_SYMBOL = re.compile(r'^(?:>|>>|->|>|>>|next\s*[>>>->>]*)$', re.I)
+LOAD = re.compile(r'\b(?:load|show|view|see)\s+(?:\d+\s+)?more\b', re.I)
+COOKIE = re.compile(r'^(?:accept(?: all| cookies| all cookies)?|allow all|i agree|agree|ok|got it|'
+                    r'understood|continue|dismiss|close|reject all|only necessary)$', re.I)
+REVEAL = re.compile(r'\b(?:menu|navigation|nav|accordion|expand|show|reports?|publications?|documents?|'
+                    r'resources?|downloads?|archive|library|view all|see all|all years?)\b', re.I)
+YEAR = re.compile(r'^(19|20)\d{2}$')
+ESG_NAV = re.compile(
+    r'\b(?:esg|sustainab(?:ility|le)?|environment(?:al)?|climate|social(?: responsibility)?|'
+    r'governance|corporate governance|ethics|compliance|polic(?:y|ies)|reports?|disclosures?|'
+    r'documents?|charters?|human rights|responsible sourcing|health and safety|board|committees?|'
+    r'resources?|responsibility)\b', re.I)
+MENU_NAV = re.compile(r'^(?:menu|open menu|navigation|main menu|site menu|more)$', re.I)
 
-
-# --------------------------------------------------------------------------- #
-# Helpers
-# --------------------------------------------------------------------------- #
-def now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec='seconds')
-
-
-def ext(url: str) -> str:
-    name = urlsplit(url).path.rsplit('/', 1)[-1].lower()
-    return '.' + name.rsplit('.', 1)[-1] if '.' in name else ''
-
-
-def env(name, default, typ):
-    v = os.getenv(name)
-    if v in (None, ''):
-        return default
-    if typ is bool:
+# Vocabulary syntax:  "foo" = exact token match, "foo*" = token prefix match,
+# "foo-bar" = consecutive token phrase. This replaces v1 substring matching, which
+# misclassified corporate-accountability / our-footprint / photovoltaic and
+# false-promoted grid / agriculture.
+ESG_STRONG = (
+    'esg', 'sustainab*', 'environment*', 'climate', 'climate-change', 'carbon', 'carbon-footprint',
+    'footprint', 'emission*', 'ghg', 'greenhouse-gas', 'net-zero', 'netzero', 'decarbon*', 'renewable*',
