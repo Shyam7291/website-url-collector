@@ -64,6 +64,8 @@ ESG_STRONG = (
     'integrated-report*', 'sustainability-report*', 'responsibility-report*', 'annual-report*',
     'impact-report*', 'tcfd', 'tnfd', 'sasb', 'gri', 'cdp', 'csrd', 'sfdr', 'issb', 'sdg', 'sdgs',
     'taxonomy', 'scope-1', 'scope-2', 'scope-3', 'transition-plan', 'charter', 'disclosure*',
+    'general-meeting*', 'annual-general-meeting*', 'ordinary-general-meeting*', 'agm',
+    'privacy', 'privacy-policy', 'data-protection', 'personal-data',
 )
 ESG_GATEWAY = (
     'about', 'about-us', 'who-we-are', 'company', 'corporate', 'our-approach', 'our-commitment*',
@@ -86,13 +88,14 @@ NEGATIVE = (
     'audio', 'youtube', 'vimeo', 'career', 'careers', 'job', 'jobs', 'vacancies', 'recruitment',
     'location', 'locations', 'dealer*', 'store', 'stores', 'shop', 'cart', 'checkout', 'login',
     'logout', 'signin', 'signup', 'register', 'account', 'my-account', 'profile', 'search',
-    'share', 'print', 'privacy', 'privacy-policy', 'cookie', 'cookies', 'terms',
+    'share', 'print', 'cookie', 'cookies', 'terms',
     'terms-of-use', 'legal', 'disclaimer', 'accessibility', 'sitemap', 'rss', 'feed',
 )
 # Path tokens that strongly imply "this page lists documents".
 DOC_HUB = ('report', 'reports', 'reporting', 'publication*', 'document*', 'download*', 'library',
            'archive', 'resource', 'resources', 'disclosure*', 'filing*', 'policy', 'policies',
-           'data-centre', 'data-center', 'esg-data')
+           'data-centre', 'data-center', 'esg-data', 'general-meeting*',
+           'annual-general-meeting*', 'ordinary-general-meeting*', 'agm', 'charter*')
 
 
 # --------------------------------------------------------------------------- #
@@ -935,9 +938,14 @@ class Collector:
             if f != p.main_frame and f.url and not self.internal(f.url):
                 continue
             try:
-                vals = await f.locator('a[href],area[href]').evaluate_all(
-                    "els=>els.slice(0,3000).map(a=>[a.href,"
-                    "(a.innerText||a.getAttribute('aria-label')||a.title||'').trim()])")
+                vals = await f.locator('a[href],area[href],[data-href],[data-url],[data-link],[data-target]').evaluate_all(
+                    "els=>els.slice(0,3000).map(e=>{"
+                    "const u=e.href||e.getAttribute('data-href')||e.getAttribute('data-url')||"
+                    "e.getAttribute('data-link')||e.getAttribute('data-target')||'';"
+                    "const card=e.closest('article,.card,.item,.row,li,section,div');"
+                    "const heading=card?card.querySelector('h1,h2,h3,h4,h5,h6,.title,.heading'):null;"
+                    "const label=[heading?heading.textContent:'',e.innerText||e.getAttribute('aria-label')||e.title||''].filter(Boolean).join(' | ').trim();"
+                    "try{return [new URL(u,document.baseURI).href,label]}catch(_){return ['',label]}})")
             except PWError:
                 continue
             src = 'page' if f == p.main_frame else 'iframe'
@@ -1071,15 +1079,21 @@ class Collector:
             if not n or n in seen or self.doclike(n) or self.is_pagination(n, parent, text):
                 continue
             seen.add(n)
-            strong, negative, _, _ = self.signals(n, text)
+            strong, negative, gateway, dochub = self.signals(n, text)
+            parent_strong, _, parent_gateway, parent_dochub = self.signals(parent, '')
             rank = self.priority(n, text)
             if negative and not strong:
                 self.increment_counter('negative')
+                self.audit_priority(n, parent, text, 'link', depth + 1, rank, strong, negative,
+                                    gateway, dochub, 'IGNORED', 'NEGATIVE_WITHOUT_ESG_OVERRIDE')
                 continue
-            if rank > 0 and parent_is_detail and \
+            protected_branch = strong or dochub or parent_strong or parent_dochub or parent_gateway
+            if rank > 0 and not protected_branch and parent_is_detail and \
                     not self.cfg.follow_same_family_links_from_detail_pages and \
                     self.url_family(n) == parent_family:
                 self.increment_counter('same_family')
+                self.audit_priority(n, parent, text, 'link', depth + 1, rank, strong, negative,
+                                    gateway, dochub, 'IGNORED', 'SAME_FAMILY_DETAIL_SUPPRESSION')
                 continue
             candidates.append((rank, n, text))
         candidates.sort(key=lambda x: (x[0], x[1]))
