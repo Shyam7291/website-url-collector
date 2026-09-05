@@ -4,6 +4,12 @@
   "max_year_options": 2,
   "max_depth": 12,
   "max_pages_per_website": 3000,
+  "max_new_children_per_page": 40,
+  "max_homepage_children": 100,
+  "max_pages_per_url_family": 25,
+  "max_query_variants_per_path": 3,
+  "follow_same_family_links_from_detail_pages": false,
+  "prioritize_document_likely_pages": true,
   "page_timeout_seconds": 30,
   "page_attempt_timeout_seconds": 60,
   "page_close_timeout_seconds": 5,
@@ -16,21 +22,7 @@
   "export_checkpoint_pages": 25,
   "block_heavy_resources": true,
   "document_head_timeout_seconds": 4,
-  "keep_meaningful_query_parameters": [
-    "year",
-    "page",
-    "category",
-    "type",
-    "section"
-  ],
-  "remove_query_parameters": [
-    "utm_source",
-    "utm_medium",
-    "utm_campaign",
-    "utm_term",
-    "utm_content",
-    "fbclid",
-    "gclid"
-  ],
+  "keep_meaningful_query_parameters": ["year", "page", "category", "type", "section"],
+  "remove_query_parameters": ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "fbclid", "gclid"],
   "allowed_hosts": []
 }
