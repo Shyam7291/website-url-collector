@@ -36,7 +36,7 @@ class Config:
     crawl_subdomains:bool=True; stabilization_seconds:float=0.6
     restrict_to_seed_language:bool=True; export_checkpoint_pages:int=25
     block_heavy_resources:bool=True; document_head_timeout_seconds:int=4
-    page_attempt_timeout_seconds:int=60; page_close_timeout_seconds:int=5
+    page_attempt_timeout_seconds:int=75; page_close_timeout_seconds:int=5
     max_new_children_per_page:int=40; max_homepage_children:int=100
     max_pages_per_url_family:int=25; max_query_variants_per_path:int=3
     follow_same_family_links_from_detail_pages:bool=False; prioritize_document_likely_pages:bool=True
@@ -302,16 +302,35 @@ class Collector:
         elapsed=time.monotonic()-self.started
         logging.info('PROGRESS completed=%s queued=%s elapsed_seconds=%.1f current_url=%s',done,queued,elapsed,current_url)
     async def process_with_watchdog(self,ctx,row):
-        timeout=self.cfg.page_attempt_timeout_seconds*(self.cfg.max_retries+1)+15
+        # Hard limit for the complete source page, including retries and interactions.
+        # One bad page is failed and the queue continues.
+        timeout=self.cfg.page_attempt_timeout_seconds
+        started=time.perf_counter()
         try:
             await asyncio.wait_for(self.process(ctx,row),timeout=timeout)
         except asyncio.TimeoutError:
-            u=row['normalized_url'];logging.error('Whole-page watchdog timeout after %ss: %s',timeout,u)
+            u=row['normalized_url']
+            logging.error('HARD PAGE TIMEOUT after %ss: %s',timeout,u)
+            # Cancellation can leave a Playwright page alive. Close every open page
+            # before continuing so a stuck page cannot poison later pages.
+            for open_page in list(ctx.pages):
+                await self.safe_close(open_page)
             order=self.db.execute('SELECT COALESCE(MAX(processed_order),0)+1 FROM pages').fetchone()[0]
-            self.db.execute("UPDATE pages SET status='FAILED',page_type='FAILED',processed_order=?,processed_at=?,error_message=? WHERE id=?",(order,now(),f'Whole-page watchdog timeout after {timeout}s',row['id']))
+            self.db.execute("UPDATE pages SET status='FAILED',page_type='FAILED',processed_order=?,processed_at=?,error_message=? WHERE id=?",(order,now(),f'Hard page timeout after {timeout}s',row['id']))
             self.db.commit()
             if self.current_perf is not None:
-                self.record_perf(u,'FAILED',None,time.perf_counter()-timeout,self.cfg.max_retries)
+                self.record_perf(u,'FAILED',None,started,self.cfg.max_retries)
+                self.current_perf=None
+        except Exception as exc:
+            u=row['normalized_url']
+            logging.exception('Page watchdog caught unexpected error for %s',u)
+            for open_page in list(ctx.pages):
+                await self.safe_close(open_page)
+            order=self.db.execute('SELECT COALESCE(MAX(processed_order),0)+1 FROM pages').fetchone()[0]
+            self.db.execute("UPDATE pages SET status='FAILED',page_type='FAILED',processed_order=?,processed_at=?,error_message=? WHERE id=?",(order,now(),f'Watchdog error: {type(exc).__name__}: {exc}'[:2000],row['id']))
+            self.db.commit()
+            if self.current_perf is not None:
+                self.record_perf(u,'FAILED',None,started,self.cfg.max_retries)
                 self.current_perf=None
     async def process(self,ctx,row):
         u=row['normalized_url'];depth=row['depth'];self.stats['max_depth']=max(depth,self.stats['max_depth'])
