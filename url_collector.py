@@ -18,25 +18,27 @@ NEXT=re.compile(r'^(?:next|older|more|2|page 2)\s*(?:›|»|→)?$',re.I)
 LOAD=re.compile(r'\b(?:load more|show more)\b',re.I)
 COOKIE=re.compile(r'^(?:accept(?: all)?|allow all|agree|got it|continue|dismiss|close)$',re.I)
 REVEAL=re.compile(r'\b(?:menu|navigation|nav|accordion|expand|reports?|publications?|documents?|resources?|view all)\b',re.I)
-ESG_STRONG=(
+ESG_WORDS=(
 'esg','sustainab','environment','climate','carbon','emission','net-zero','decarbon','renewable','energy-efficiency',
-'water','waste','recycl','circular-economy','biodiversity','nature','natural-capital','pollution','social-impact',
-'social-responsibility','corporate-responsibility','csr','community','human-right','labor-right','labour-right',
-'modern-slavery','responsible-sourcing','supplier-code','diversity','inclusion','equity','dei','health-and-safety',
-'occupational-health','employee-wellbeing','governance','ethics','compliance','code-of-conduct','anti-corruption',
-'anti-bribery','whistleblower','risk-management','stakeholder','materiality','integrated-report','responsibility-report',
-'tcfd','tnfd','sasb','gri','cdp','csrd','taxonomy','scope-1','scope-2','scope-3','transition-plan','charter','disclosure'
+'water','waste','recycl','circular','biodiversity','nature','pollution','social-responsibility','corporate-responsibility',
+'csr','community','human-right','labor-right','labour-right','modern-slavery','responsible-sourcing','supplier-code',
+'diversity','inclusion','equity','dei','health-and-safety','occupational-health','employee-wellbeing','governance',
+'ethics','compliance','code-of-conduct','anti-corruption','anti-bribery','whistleblower','risk-management',
+'stakeholder','materiality','integrated-report','responsibility-report','tcfd','tnfd','sasb','gri','cdp','csrd',
+'taxonomy','scope-1','scope-2','scope-3','transition-plan','charter','disclosure','documents-charters'
 )
-ESG_GATEWAY=('about','company','our-approach','responsibility','policy','policies','committee','board','resource')
-NEGATIVE=(
+ESG_GATEWAYS=('investor','responsibility','policy','policies','committee','board','about','company','resource')
+NEGATIVE_WORDS=(
 'earning','quarterly-result','financial-result','sec-filing','sec-filings','10-k','10-q','8-k','proxy','stock-info',
-'share-price','dividend','analyst-coverage','credit-rating','debt-information','bond-information','investor-presentation',
-'presentation','webcast','transcript','news','newsroom','press-release','media-release','event','calendar','conference',
-'webinar','podcast','stories','article','blog','insight','contact','contact-us','email-alert','subscribe','newsletter',
-'customer-support','request-information','request-a-demo','photo','image','gallery','video','multimedia','audio','youtube',
-'vimeo','career','jobs','locations','store','shop','cart','checkout','login','logout','signin','signup','account','search',
-'share','print','privacy','cookie','terms','accessibility'
+'share-price','dividend','analyst-coverage','credit-rating','debt-information','bond-information','presentation',
+'webcast','transcript','news','newsroom','press-release','media-release','event','calendar','conference','webinar',
+'podcast','stories','article','blog','insight','contact','email-alert','subscribe','newsletter','customer-support',
+'request-information','request-a-demo','photo','gallery','video','multimedia','audio','youtube','vimeo','career',
+'jobs','locations','store','shop','cart','checkout','login','logout','signin','signup','account','search','share',
+'print','privacy','cookie','terms','accessibility'
 )
+ESG_CONTROL=re.compile(r'\b(?:esg|sustainab(?:ility|le)?|environment(?:al)?|climate|social(?: responsibility)?|governance|corporate governance|ethics|compliance|polic(?:y|ies)|reports?|disclosures?|documents?|charters?|human rights|responsible sourcing|health and safety|board|committees?|resources?)\b',re.I)
+MENU_CONTROL=re.compile(r'^(?:menu|open menu|navigation|main menu|site menu|more)$',re.I)
 
 def now(): return datetime.now(timezone.utc).isoformat(timespec='seconds')
 def ext(url):
@@ -59,6 +61,7 @@ class Config:
     max_new_children_per_page:int=40; max_homepage_children:int=100
     max_pages_per_url_family:int=25; max_query_variants_per_path:int=3
     follow_same_family_links_from_detail_pages:bool=False; prioritize_document_likely_pages:bool=True
+    max_esg_navigation_clicks_per_page:int=8
     keep_meaningful_query_parameters:tuple=('year','page','category','type','section')
     remove_query_parameters:tuple=('utm_source','utm_medium','utm_campaign','utm_term','utm_content','fbclid','gclid')
     allowed_hosts:tuple=()
@@ -70,7 +73,7 @@ class Config:
             if k not in names: raw.pop(k)
             elif isinstance(getattr(cls(),k),tuple): raw[k]=tuple(raw[k])
         c=cls(**raw)
-        mapping={'max_pagination_pages':('MAX_PAGINATION_PAGES',int),'max_load_more_clicks':('MAX_LOAD_MORE_CLICKS',int),'max_year_options':('MAX_YEAR_OPTIONS',int),'max_depth':('MAX_DEPTH',int),'max_pages_per_website':('MAX_PAGES',int),'page_timeout_seconds':('PAGE_TIMEOUT_SECONDS',int),'delay_between_pages_seconds':('DELAY_BETWEEN_PAGES_SECONDS',float),'max_retries':('MAX_RETRIES',int),'max_runtime_minutes':('MAX_RUNTIME_MINUTES',int),'crawl_subdomains':('CRAWL_SUBDOMAINS',bool),'restrict_to_seed_language':('RESTRICT_TO_SEED_LANGUAGE',bool),'export_checkpoint_pages':('EXPORT_CHECKPOINT_PAGES',int),'block_heavy_resources':('BLOCK_HEAVY_RESOURCES',bool),'document_head_timeout_seconds':('DOCUMENT_HEAD_TIMEOUT_SECONDS',int),'page_attempt_timeout_seconds':('PAGE_ATTEMPT_TIMEOUT_SECONDS',int),'page_close_timeout_seconds':('PAGE_CLOSE_TIMEOUT_SECONDS',int),'max_new_children_per_page':('MAX_NEW_CHILDREN_PER_PAGE',int),'max_homepage_children':('MAX_HOMEPAGE_CHILDREN',int),'max_pages_per_url_family':('MAX_PAGES_PER_URL_FAMILY',int),'max_query_variants_per_path':('MAX_QUERY_VARIANTS_PER_PATH',int),'follow_same_family_links_from_detail_pages':('FOLLOW_SAME_FAMILY_LINKS_FROM_DETAIL_PAGES',bool),'prioritize_document_likely_pages':('PRIORITIZE_DOCUMENT_LIKELY_PAGES',bool)}
+        mapping={'max_pagination_pages':('MAX_PAGINATION_PAGES',int),'max_load_more_clicks':('MAX_LOAD_MORE_CLICKS',int),'max_year_options':('MAX_YEAR_OPTIONS',int),'max_depth':('MAX_DEPTH',int),'max_pages_per_website':('MAX_PAGES',int),'page_timeout_seconds':('PAGE_TIMEOUT_SECONDS',int),'delay_between_pages_seconds':('DELAY_BETWEEN_PAGES_SECONDS',float),'max_retries':('MAX_RETRIES',int),'max_runtime_minutes':('MAX_RUNTIME_MINUTES',int),'crawl_subdomains':('CRAWL_SUBDOMAINS',bool),'restrict_to_seed_language':('RESTRICT_TO_SEED_LANGUAGE',bool),'export_checkpoint_pages':('EXPORT_CHECKPOINT_PAGES',int),'block_heavy_resources':('BLOCK_HEAVY_RESOURCES',bool),'document_head_timeout_seconds':('DOCUMENT_HEAD_TIMEOUT_SECONDS',int),'page_attempt_timeout_seconds':('PAGE_ATTEMPT_TIMEOUT_SECONDS',int),'page_close_timeout_seconds':('PAGE_CLOSE_TIMEOUT_SECONDS',int),'max_new_children_per_page':('MAX_NEW_CHILDREN_PER_PAGE',int),'max_homepage_children':('MAX_HOMEPAGE_CHILDREN',int),'max_pages_per_url_family':('MAX_PAGES_PER_URL_FAMILY',int),'max_query_variants_per_path':('MAX_QUERY_VARIANTS_PER_PATH',int),'follow_same_family_links_from_detail_pages':('FOLLOW_SAME_FAMILY_LINKS_FROM_DETAIL_PAGES',bool),'prioritize_document_likely_pages':('PRIORITIZE_DOCUMENT_LIKELY_PAGES',bool),'max_esg_navigation_clicks_per_page':('MAX_ESG_NAVIGATION_CLICKS_PER_PAGE',int)}
         for a,(e,t) in mapping.items(): setattr(c,a,env(e,getattr(c,a),t))
         c.max_pagination_pages=max(1,c.max_pagination_pages); return c
 
@@ -86,7 +89,7 @@ class Collector:
         self.current_perf=None
         self.run_delay_seconds=0.0
         self.run_export_seconds=0.0
-        self.expansion=dict(parent_budget=0,family_limit=0,query_limit=0,same_family=0,after_page_limit=0,negative=0,esg_priority=0)
+        self.expansion=dict(parent_budget=0,family_limit=0,query_limit=0,same_family=0,after_page_limit=0,negative=0,esg_priority=0,esg_reveal=0)
         self.started=time.monotonic(); self.stop=False; self.page_limit=False; self.runtime_limit=False
         self.stats=dict(duplicates=0,pagination_detected=0,pagination_limits=0,pagination_states=0,load_more=0,max_depth=0)
         self.db=sqlite3.connect('crawler.db'); self.db.row_factory=sqlite3.Row; self.init_db()
@@ -150,14 +153,14 @@ class Collector:
         p=urlsplit(u);return p.scheme+'://'+p.netloc+p.path
     def signals(self,u,text=''):
         value=(u+' '+text).lower().replace('_','-')
-        strong=any(x in value for x in ESG_STRONG)
-        negative=any(x in value for x in NEGATIVE)
-        gateway=any(x in value for x in ESG_GATEWAY)
-        return strong,negative,gateway
+        esg=any(word in value for word in ESG_WORDS)
+        negative=any(word in value for word in NEGATIVE_WORDS)
+        gateway=any(word in value for word in ESG_GATEWAYS)
+        return esg,negative,gateway
     def priority(self,u,text=''):
-        strong,negative,gateway=self.signals(u,text)
+        esg,negative,gateway=self.signals(u,text)
         host=(urlsplit(u).hostname or '').lower()
-        if strong:return 0
+        if esg:return 0
         if host!=self.host and ('investor' in host or 'esg' in host or 'sustain' in host or 'responsib' in host):return 0
         if negative:return 9
         if gateway:return 1
@@ -175,9 +178,9 @@ class Collector:
         if parent:self.db.execute('INSERT OR IGNORE INTO links(from_url,to_url,normalized_to_url,link_text,discovered_at) VALUES(?,?,?,?,?)',(parent,u,n,text[:500],now()))
         if self.db.execute('SELECT 1 FROM pages WHERE normalized_url=?',(n,)).fetchone():
             self.stats['duplicates']+=1;self.db.commit();return False
-        strong,negative,_=self.signals(n,text)
+        esg,negative,_=self.signals(n,text)
         if priority is None:priority=self.priority(n,text)
-        if negative and not strong:
+        if negative and not esg:
             self.increment_counter('negative');return False
         ok,why=self.policy(n)
         count=self.db.execute("SELECT COUNT(*) FROM pages WHERE status!='SKIPPED'").fetchone()[0]
@@ -225,17 +228,33 @@ class Collector:
         except PWError:pass
         return False
     async def reveal(self,p):
-        clicked=False
-        try:
-            # Homepage may reveal global navigation. Deeper pages prioritize content controls.
-            selector="button:not([type=submit]),[role=button]" if p.url.rstrip('/')==self.seed.rstrip('/') else "main button:not([type=submit]),main [role=button],article button:not([type=submit]),[role=main] button:not([type=submit])"
-            loc=p.locator(selector)
-            for i in range(min(await loc.count(),30)):
-                el=loc.nth(i); text=((await el.inner_text(timeout=350)) or await el.get_attribute('aria-label') or '').strip()
-                if text and REVEAL.search(text) and await el.is_visible() and await el.get_attribute('aria-expanded')=='false':
-                    try:await el.click(timeout=800);clicked=True
-                    except PWError:pass
-        except PWError:pass
+        clicked=False;clicked_keys=set();clicks=0
+        # Stage 1 opens a global menu on the seed homepage or any related subdomain homepage.
+        # Stage 2 opens ESG-labelled tabs, accordions, and submenu buttons.
+        for stage in ('menu','esg'):
+            for _ in range(self.cfg.max_esg_navigation_clicks_per_page):
+                candidate=None;candidate_key=None
+                try:
+                    loc=p.locator("button:not([type=submit]),[role=button],[aria-haspopup=menu]")
+                    for i in range(min(await loc.count(),80)):
+                        el=loc.nth(i)
+                        label=((await el.inner_text(timeout=350)) or await el.get_attribute('aria-label') or await el.get_attribute('title') or '').strip()
+                        key=(label.lower(),await el.get_attribute('id') or '',await el.get_attribute('class') or '')
+                        if key in clicked_keys or not await el.is_visible():continue
+                        expanded=await el.get_attribute('aria-expanded')
+                        if expanded=='true':continue
+                        if stage=='menu' and MENU_CONTROL.search(label):candidate,candidate_key=el,key;break
+                        if stage=='esg' and ESG_CONTROL.search(label):candidate,candidate_key=el,key;break
+                    if candidate is None:break
+                    before=len(await self.links(p))
+                    await candidate.click(timeout=1200);clicked_keys.add(candidate_key);clicks+=1;clicked=True
+                    await p.wait_for_timeout(250)
+                    after=len(await self.links(p))
+                    logging.info('ESG navigation revealed label=%s new_links=%s',candidate_key[0],max(0,after-before))
+                    self.increment_counter('esg_reveal')
+                    if clicks>=self.cfg.max_esg_navigation_clicks_per_page:break
+                except PWError:break
+            if clicks>=self.cfg.max_esg_navigation_clicks_per_page:break
         return clicked
     async def links(self,p):
         """All links are used for child-page discovery."""
@@ -299,17 +318,16 @@ class Collector:
         for child,text,_ in all_links:
             n=self.norm(child,parent)
             if not n or n in seen or self.doclike(n) or self.is_pagination(n,parent,text):continue
-            seen.add(n);strong,negative,_=self.signals(n,text);rank=self.priority(n,text)
-            if negative and not strong:self.increment_counter('negative');continue
+            seen.add(n);esg,negative,_=self.signals(n,text);rank=self.priority(n,text)
+            if negative and not esg:self.increment_counter('negative');continue
             if rank>0 and parent_is_detail and not self.cfg.follow_same_family_links_from_detail_pages and self.url_family(n)==parent_family:
                 self.increment_counter('same_family');continue
             candidates.append((rank,n,text))
         candidates.sort(key=lambda x:(x[0],x[1]))
         budget=self.cfg.max_homepage_children if parent.rstrip('/')==self.seed.rstrip('/') else self.cfg.max_new_children_per_page
-        priority_zero=[x for x in candidates if x[0]==0]
-        normal=[x for x in candidates if x[0]>0][:budget]
-        selected=priority_zero+normal
-        for rank,n,text in selected:self.add(n,parent,text,depth+1,rank)
+        important=[x for x in candidates if x[0]==0]
+        ordinary=[x for x in candidates if x[0]>0][:budget]
+        for rank,n,text in important+ordinary:self.add(n,parent,text,depth+1,rank)
         ignored=max(0,len([x for x in candidates if x[0]>0])-budget)
         if ignored:self.increment_counter('parent_budget',ignored)
         return found,all_links,document_url,document_source
@@ -458,7 +476,7 @@ class Collector:
 
     def summary(self):
         c=dict(self.db.execute('SELECT status,COUNT(*) FROM pages GROUP BY status'));t=dict(self.db.execute('SELECT page_type,COUNT(*) FROM pages GROUP BY page_type'));total=self.db.execute('SELECT COUNT(*) FROM pages').fetchone()[0]
-        logging.info('FINAL seed=%s discovered=%s processed=%s PDF=%s HTML=%s failed=%s skipped=%s duplicates=%s pagination=%s pagination_limits=%s pagination_states=%s load_more=%s max_depth=%s page_limit=%s runtime_limit=%s runtime_seconds=%.1f configured_delay_seconds=%.1f export_seconds=%.1f parent_budget_ignored=%s family_limit_ignored=%s query_limit_ignored=%s same_family_ignored=%s after_page_limit_ignored=%s negative_ignored=%s esg_prioritized=%s',self.seed,total,c.get('PROCESSED',0),t.get('PDF',0),t.get('HTML',0),c.get('FAILED',0),c.get('SKIPPED',0),self.stats['duplicates'],self.stats['pagination_detected'],self.stats['pagination_limits'],self.stats['pagination_states'],self.stats['load_more'],self.stats['max_depth'],self.page_limit,self.runtime_limit,time.monotonic()-self.started,self.run_delay_seconds,self.run_export_seconds,self.expansion['parent_budget'],self.expansion['family_limit'],self.expansion['query_limit'],self.expansion['same_family'],self.expansion['after_page_limit'],self.expansion['negative'],self.expansion['esg_priority'])
+        logging.info('FINAL seed=%s discovered=%s processed=%s PDF=%s HTML=%s failed=%s skipped=%s duplicates=%s pagination=%s pagination_limits=%s pagination_states=%s load_more=%s max_depth=%s page_limit=%s runtime_limit=%s runtime_seconds=%.1f configured_delay_seconds=%.1f export_seconds=%.1f parent_budget_ignored=%s family_limit_ignored=%s query_limit_ignored=%s same_family_ignored=%s after_page_limit_ignored=%s negative_ignored=%s esg_prioritized=%s esg_navigation_reveals=%s',self.seed,total,c.get('PROCESSED',0),t.get('PDF',0),t.get('HTML',0),c.get('FAILED',0),c.get('SKIPPED',0),self.stats['duplicates'],self.stats['pagination_detected'],self.stats['pagination_limits'],self.stats['pagination_states'],self.stats['load_more'],self.stats['max_depth'],self.page_limit,self.runtime_limit,time.monotonic()-self.started,self.run_delay_seconds,self.run_export_seconds,self.expansion['parent_budget'],self.expansion['family_limit'],self.expansion['query_limit'],self.expansion['same_family'],self.expansion['after_page_limit'],self.expansion['negative'],self.expansion['esg_priority'],self.expansion['esg_reveal'])
     async def run(self):
         self.add(self.seed,None,'Home',0)
         async with async_playwright() as pw:
