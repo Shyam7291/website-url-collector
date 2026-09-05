@@ -1,7 +1,4 @@
-from __future__ import annotations
-
-import argparse, asyncio, csv, hashlib, json, logging, os, re, signal, sqlite3, sys, time
-from dataclasses import dataclass, fields
-from datetime import datetime, timezone
-from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+Every loop below is guarded by an explicit ceiling AND a visited/signature set,
+so no code path can spin forever. What changed is that the same bounded budget
+is now spent far more intelligently (see CHANGELOG at the bottom of this file).
+"""
