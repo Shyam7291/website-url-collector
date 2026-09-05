@@ -11,3 +11,4 @@ run_date,seed_url,max_pages_requested,discovered,processed,pdf_pages,html_pages,
 2026-09-05 04:44:25 UTC,https://www.gehealthcare.com/,200,212,181,52,129,19,12,0,QUEUE_EXHAUSTED,true,false,false,6
 2026-09-05 05:28:41 UTC,https://www.gehealthcare.com/,200,310,190,38,152,10,110,0,QUEUE_EXHAUSTED,true,false,false,7
 2026-09-05 06:03:07 UTC,https://www.gehealthcare.com/en-us,200,729,199,35,164,1,529,0,QUEUE_EXHAUSTED,true,false,false,4
+2026-09-05 07:42:24 UTC,https://www.gehealthcare.com/en-us,200,586,180,52,128,21,385,0,QUEUE_EXHAUSTED,true,false,false,5
