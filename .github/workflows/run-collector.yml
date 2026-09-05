@@ -69,7 +69,7 @@ jobs:
         run: |
           touch classified_pages.csv pdf_pages.csv html_pages.csv
           touch failed_pages.csv document_evidence.csv crawler.db collector.log
-          touch PERFORMANCE_REPORT.csv
+          touch PERFORMANCE_REPORT.csv PRIORITY_REPORT.csv
 
       - name: Update repository CSV tables
         if: ${{ always() }}
@@ -85,7 +85,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add RUN_SUMMARY.csv PDF_PAGES.csv PERFORMANCE_REPORT.csv
+          git add RUN_SUMMARY.csv PDF_PAGES.csv PERFORMANCE_REPORT.csv PRIORITY_REPORT.csv
           if git diff --cached --quiet; then
             echo "Repository result tables have no changes to commit."
           else
@@ -109,5 +109,6 @@ jobs:
             RUN_SUMMARY.csv
             PDF_PAGES.csv
             PERFORMANCE_REPORT.csv
+            PRIORITY_REPORT.csv
           if-no-files-found: warn
           retention-days: 30
