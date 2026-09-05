@@ -37,6 +37,9 @@ class Config:
     restrict_to_seed_language:bool=True; export_checkpoint_pages:int=25
     block_heavy_resources:bool=True; document_head_timeout_seconds:int=4
     page_attempt_timeout_seconds:int=60; page_close_timeout_seconds:int=5
+    max_new_children_per_page:int=40; max_homepage_children:int=100
+    max_pages_per_url_family:int=25; max_query_variants_per_path:int=3
+    follow_same_family_links_from_detail_pages:bool=False; prioritize_document_likely_pages:bool=True
     keep_meaningful_query_parameters:tuple=('year','page','category','type','section')
     remove_query_parameters:tuple=('utm_source','utm_medium','utm_campaign','utm_term','utm_content','fbclid','gclid')
     allowed_hosts:tuple=()
@@ -48,7 +51,7 @@ class Config:
             if k not in names: raw.pop(k)
             elif isinstance(getattr(cls(),k),tuple): raw[k]=tuple(raw[k])
         c=cls(**raw)
-        mapping={'max_pagination_pages':('MAX_PAGINATION_PAGES',int),'max_load_more_clicks':('MAX_LOAD_MORE_CLICKS',int),'max_year_options':('MAX_YEAR_OPTIONS',int),'max_depth':('MAX_DEPTH',int),'max_pages_per_website':('MAX_PAGES',int),'page_timeout_seconds':('PAGE_TIMEOUT_SECONDS',int),'delay_between_pages_seconds':('DELAY_BETWEEN_PAGES_SECONDS',float),'max_retries':('MAX_RETRIES',int),'max_runtime_minutes':('MAX_RUNTIME_MINUTES',int),'crawl_subdomains':('CRAWL_SUBDOMAINS',bool),'restrict_to_seed_language':('RESTRICT_TO_SEED_LANGUAGE',bool),'export_checkpoint_pages':('EXPORT_CHECKPOINT_PAGES',int),'block_heavy_resources':('BLOCK_HEAVY_RESOURCES',bool),'document_head_timeout_seconds':('DOCUMENT_HEAD_TIMEOUT_SECONDS',int),'page_attempt_timeout_seconds':('PAGE_ATTEMPT_TIMEOUT_SECONDS',int),'page_close_timeout_seconds':('PAGE_CLOSE_TIMEOUT_SECONDS',int)}
+        mapping={'max_pagination_pages':('MAX_PAGINATION_PAGES',int),'max_load_more_clicks':('MAX_LOAD_MORE_CLICKS',int),'max_year_options':('MAX_YEAR_OPTIONS',int),'max_depth':('MAX_DEPTH',int),'max_pages_per_website':('MAX_PAGES',int),'page_timeout_seconds':('PAGE_TIMEOUT_SECONDS',int),'delay_between_pages_seconds':('DELAY_BETWEEN_PAGES_SECONDS',float),'max_retries':('MAX_RETRIES',int),'max_runtime_minutes':('MAX_RUNTIME_MINUTES',int),'crawl_subdomains':('CRAWL_SUBDOMAINS',bool),'restrict_to_seed_language':('RESTRICT_TO_SEED_LANGUAGE',bool),'export_checkpoint_pages':('EXPORT_CHECKPOINT_PAGES',int),'block_heavy_resources':('BLOCK_HEAVY_RESOURCES',bool),'document_head_timeout_seconds':('DOCUMENT_HEAD_TIMEOUT_SECONDS',int),'page_attempt_timeout_seconds':('PAGE_ATTEMPT_TIMEOUT_SECONDS',int),'page_close_timeout_seconds':('PAGE_CLOSE_TIMEOUT_SECONDS',int),'max_new_children_per_page':('MAX_NEW_CHILDREN_PER_PAGE',int),'max_homepage_children':('MAX_HOMEPAGE_CHILDREN',int),'max_pages_per_url_family':('MAX_PAGES_PER_URL_FAMILY',int),'max_query_variants_per_path':('MAX_QUERY_VARIANTS_PER_PATH',int),'follow_same_family_links_from_detail_pages':('FOLLOW_SAME_FAMILY_LINKS_FROM_DETAIL_PAGES',bool),'prioritize_document_likely_pages':('PRIORITIZE_DOCUMENT_LIKELY_PAGES',bool)}
         for a,(e,t) in mapping.items(): setattr(c,a,env(e,getattr(c,a),t))
         c.max_pagination_pages=max(1,c.max_pagination_pages); return c
 
@@ -64,6 +67,7 @@ class Collector:
         self.current_perf=None
         self.run_delay_seconds=0.0
         self.run_export_seconds=0.0
+        self.expansion=dict(parent_budget=0,family_limit=0,query_limit=0,same_family=0,after_page_limit=0)
         self.started=time.monotonic(); self.stop=False; self.page_limit=False; self.runtime_limit=False
         self.stats=dict(duplicates=0,pagination_detected=0,pagination_limits=0,pagination_states=0,load_more=0,max_depth=0)
         self.db=sqlite3.connect('crawler.db'); self.db.row_factory=sqlite3.Row; self.init_db()
@@ -108,21 +112,57 @@ class Collector:
         CREATE TABLE IF NOT EXISTS links(id INTEGER PRIMARY KEY AUTOINCREMENT,from_url TEXT NOT NULL,to_url TEXT NOT NULL,normalized_to_url TEXT NOT NULL,link_text TEXT,discovered_at TEXT,UNIQUE(from_url,normalized_to_url));
         CREATE TABLE IF NOT EXISTS document_evidence(id INTEGER PRIMARY KEY AUTOINCREMENT,source_url TEXT NOT NULL,document_url TEXT NOT NULL,detection_source TEXT NOT NULL,detected_at TEXT NOT NULL,UNIQUE(source_url,document_url));
         CREATE TABLE IF NOT EXISTS performance(id INTEGER PRIMARY KEY AUTOINCREMENT,source_url TEXT NOT NULL,page_type TEXT,http_status INTEGER,total_seconds REAL,navigation_seconds REAL,stabilization_seconds REAL,interaction_seconds REAL,scan_seconds REAL,other_seconds REAL,retry_count INTEGER,recorded_at TEXT);
+        CREATE TABLE IF NOT EXISTS crawl_counters(name TEXT PRIMARY KEY,value INTEGER NOT NULL DEFAULT 0);
         """); self.db.commit()
+    def url_family(self,u):
+        parts=[x for x in urlsplit(u).path.lower().split('/') if x]
+        if not parts:return '/'
+        def variable(x):
+            if x.isdigit() or re.fullmatch(r'\d{4}',x):return True
+            if len(x)>24 and ('-' in x or '_' in x):return True
+            return False
+        normalized=[]
+        for i,x in enumerate(parts):
+            normalized.append('{detail}' if variable(x) and i>=1 else x)
+        if len(normalized)>=4:normalized=normalized[:3]+['{detail}']
+        return '/'+ '/'.join(normalized) +'/'
+    def query_path(self,u):
+        p=urlsplit(u);return p.scheme+'://'+p.netloc+p.path
+    def priority(self,u,text=''):
+        value=(u+' '+text).lower()
+        high=('report','result','financial','investor','annual','quarter','sustainab','governance','document','download','publication','resource','filing','presentation','statement','policy','disclosure')
+        medium=('company','about','product','solution','media','news','insight')
+        if any(x in value for x in high):return 0
+        if any(x in value for x in medium):return 1
+        return 2
+    def increment_counter(self,name,amount=1):
+        self.expansion[name]=self.expansion.get(name,0)+amount
+        self.db.execute('INSERT INTO crawl_counters(name,value) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET value=value+excluded.value',(name,amount));self.db.commit()
+    def family_count(self,family):
+        return self.db.execute("SELECT COUNT(*) FROM pages WHERE error_message=? OR normalized_url LIKE ?",('family:'+family,'%')).fetchone()[0] if False else sum(1 for r in self.db.execute("SELECT normalized_url FROM pages WHERE status!='SKIPPED'") if self.url_family(r[0])==family)
+    def query_variant_count(self,u):
+        base=self.query_path(u);return sum(1 for r in self.db.execute("SELECT normalized_url FROM pages WHERE status!='SKIPPED'") if self.query_path(r[0])==base and urlsplit(r[0]).query)
     def add(self,u,parent,text,depth):
         n=self.norm(u,parent or self.seed)
         if not n:return False
         if parent:self.db.execute('INSERT OR IGNORE INTO links(from_url,to_url,normalized_to_url,link_text,discovered_at) VALUES(?,?,?,?,?)',(parent,u,n,text[:500],now()))
         if self.db.execute('SELECT 1 FROM pages WHERE normalized_url=?',(n,)).fetchone():
-            self.stats['duplicates']+=1; self.db.commit(); logging.debug('Duplicate ignored %s',n); return False
-        ok,why=self.policy(n); status='DISCOVERED'; typ=err=None
+            self.stats['duplicates']+=1;self.db.commit();return False
+        ok,why=self.policy(n)
         count=self.db.execute("SELECT COUNT(*) FROM pages WHERE status!='SKIPPED'").fetchone()[0]
+        if count>=self.cfg.max_pages_per_website:
+            self.page_limit=True;self.increment_counter('after_page_limit');return False
+        if ok and urlsplit(n).query and self.query_variant_count(n)>=self.cfg.max_query_variants_per_path:
+            self.increment_counter('query_limit');return False
+        family=self.url_family(n)
+        if ok and self.family_count(family)>=self.cfg.max_pages_per_url_family:
+            self.increment_counter('family_limit');return False
+        status='DISCOVERED';typ=err=None
         if depth>self.cfg.max_depth:status,typ,err='SKIPPED','SKIPPED','Beyond maximum depth'
         elif not ok:status,typ,err='SKIPPED','SKIPPED',why
-        elif count>=self.cfg.max_pages_per_website:status,typ,err,self.page_limit='SKIPPED','SKIPPED','Page limit reached',True
         order=self.db.execute('SELECT COALESCE(MAX(discovered_order),0)+1 FROM pages').fetchone()[0]
-        self.db.execute('INSERT INTO pages(seed_url,page_url,normalized_url,parent_url,link_text,depth,status,page_type,discovered_order,discovered_at,error_message) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(self.seed,u,n,parent,text[:500],depth,status,typ,order,now(),err)); self.db.commit()
-        logging.info('Discovered [%s] depth=%s %s',status,depth,n); return status=='DISCOVERED'
+        self.db.execute('INSERT INTO pages(seed_url,page_url,normalized_url,parent_url,link_text,depth,status,page_type,discovered_order,discovered_at,error_message) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(self.seed,u,n,parent,text[:500],depth,status,typ,order,now(),err));self.db.commit()
+        logging.info('Discovered [%s] depth=%s family=%s %s',status,depth,family,n);return status=='DISCOVERED'
     def next(self):return self.db.execute("SELECT * FROM pages WHERE status='DISCOVERED' ORDER BY depth DESC,discovered_order DESC LIMIT 1").fetchone()
     def expired(self):
         if time.monotonic()-self.started>=self.cfg.max_runtime_minutes*60:self.runtime_limit=True;self.stop=True
@@ -221,10 +261,20 @@ class Collector:
             if self.doclike(u) and await self.confirm(ctx,u):
                 found=True;document_url=u;document_source=src
                 logging.info('Document evidence source=%s page=%s document=%s',src,parent,u);break
-        for u,t,_ in all_links:
-            n=self.norm(u,parent)
-            if not n or self.doclike(n) or self.is_pagination(n,parent,t):continue
-            self.add(n,parent,t,depth+1)
+        candidates=[];seen=set();parent_family=self.url_family(parent)
+        parent_parts=[x for x in urlsplit(parent).path.split('/') if x]
+        parent_is_detail=len(parent_parts)>=4 or ('-' in parent_parts[-1] if parent_parts else False)
+        for child,text,_ in all_links:
+            n=self.norm(child,parent)
+            if not n or n in seen or self.doclike(n) or self.is_pagination(n,parent,text):continue
+            seen.add(n)
+            if parent_is_detail and not self.cfg.follow_same_family_links_from_detail_pages and self.url_family(n)==parent_family:
+                self.increment_counter('same_family');continue
+            candidates.append((self.priority(n,text),n,text))
+        if self.cfg.prioritize_document_likely_pages:candidates.sort(key=lambda x:(x[0],x[1]))
+        budget=self.cfg.max_homepage_children if parent.rstrip('/')==self.seed.rstrip('/') else self.cfg.max_new_children_per_page
+        for _,n,text in candidates[:budget]:self.add(n,parent,text,depth+1)
+        if len(candidates)>budget:self.increment_counter('parent_budget',len(candidates)-budget)
         return found,all_links,document_url,document_source
     def page2_candidates(self,links,current):
         out=[]
@@ -352,7 +402,7 @@ class Collector:
 
     def summary(self):
         c=dict(self.db.execute('SELECT status,COUNT(*) FROM pages GROUP BY status'));t=dict(self.db.execute('SELECT page_type,COUNT(*) FROM pages GROUP BY page_type'));total=self.db.execute('SELECT COUNT(*) FROM pages').fetchone()[0]
-        logging.info('FINAL seed=%s discovered=%s processed=%s PDF=%s HTML=%s failed=%s skipped=%s duplicates=%s pagination=%s pagination_limits=%s pagination_states=%s load_more=%s max_depth=%s page_limit=%s runtime_limit=%s runtime_seconds=%.1f configured_delay_seconds=%.1f export_seconds=%.1f',self.seed,total,c.get('PROCESSED',0),t.get('PDF',0),t.get('HTML',0),c.get('FAILED',0),c.get('SKIPPED',0),self.stats['duplicates'],self.stats['pagination_detected'],self.stats['pagination_limits'],self.stats['pagination_states'],self.stats['load_more'],self.stats['max_depth'],self.page_limit,self.runtime_limit,time.monotonic()-self.started,self.run_delay_seconds,self.run_export_seconds)
+        logging.info('FINAL seed=%s discovered=%s processed=%s PDF=%s HTML=%s failed=%s skipped=%s duplicates=%s pagination=%s pagination_limits=%s pagination_states=%s load_more=%s max_depth=%s page_limit=%s runtime_limit=%s runtime_seconds=%.1f configured_delay_seconds=%.1f export_seconds=%.1f parent_budget_ignored=%s family_limit_ignored=%s query_limit_ignored=%s same_family_ignored=%s after_page_limit_ignored=%s',self.seed,total,c.get('PROCESSED',0),t.get('PDF',0),t.get('HTML',0),c.get('FAILED',0),c.get('SKIPPED',0),self.stats['duplicates'],self.stats['pagination_detected'],self.stats['pagination_limits'],self.stats['pagination_states'],self.stats['load_more'],self.stats['max_depth'],self.page_limit,self.runtime_limit,time.monotonic()-self.started,self.run_delay_seconds,self.run_export_seconds,self.expansion['parent_budget'],self.expansion['family_limit'],self.expansion['query_limit'],self.expansion['same_family'],self.expansion['after_page_limit'])
     async def run(self):
         self.add(self.seed,None,'Home',0)
         async with async_playwright() as pw:
@@ -364,6 +414,8 @@ class Collector:
                 await ctx.route('**/*',block_heavy)
             try:
                 while not self.expired():
+                    attempted=self.db.execute("SELECT COUNT(*) FROM pages WHERE status IN ('PROCESSED','FAILED','PROCESSING')").fetchone()[0]
+                    if attempted>=self.cfg.max_pages_per_website:self.page_limit=True;break
                     row=self.next()
                     if not row:break
                     self.progress(row['normalized_url']);await self.process_with_watchdog(ctx,row);self.processed_since_export+=1
