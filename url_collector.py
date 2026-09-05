@@ -18,6 +18,25 @@ NEXT=re.compile(r'^(?:next|older|more|2|page 2)\s*(?:›|»|→)?$',re.I)
 LOAD=re.compile(r'\b(?:load more|show more)\b',re.I)
 COOKIE=re.compile(r'^(?:accept(?: all)?|allow all|agree|got it|continue|dismiss|close)$',re.I)
 REVEAL=re.compile(r'\b(?:menu|navigation|nav|accordion|expand|reports?|publications?|documents?|resources?|view all)\b',re.I)
+ESG_STRONG=(
+'esg','sustainab','environment','climate','carbon','emission','net-zero','decarbon','renewable','energy-efficiency',
+'water','waste','recycl','circular-economy','biodiversity','nature','natural-capital','pollution','social-impact',
+'social-responsibility','corporate-responsibility','csr','community','human-right','labor-right','labour-right',
+'modern-slavery','responsible-sourcing','supplier-code','diversity','inclusion','equity','dei','health-and-safety',
+'occupational-health','employee-wellbeing','governance','ethics','compliance','code-of-conduct','anti-corruption',
+'anti-bribery','whistleblower','risk-management','stakeholder','materiality','integrated-report','responsibility-report',
+'tcfd','tnfd','sasb','gri','cdp','csrd','taxonomy','scope-1','scope-2','scope-3','transition-plan','charter','disclosure'
+)
+ESG_GATEWAY=('about','company','our-approach','responsibility','policy','policies','committee','board','resource')
+NEGATIVE=(
+'earning','quarterly-result','financial-result','sec-filing','sec-filings','10-k','10-q','8-k','proxy','stock-info',
+'share-price','dividend','analyst-coverage','credit-rating','debt-information','bond-information','investor-presentation',
+'presentation','webcast','transcript','news','newsroom','press-release','media-release','event','calendar','conference',
+'webinar','podcast','stories','article','blog','insight','contact','contact-us','email-alert','subscribe','newsletter',
+'customer-support','request-information','request-a-demo','photo','image','gallery','video','multimedia','audio','youtube',
+'vimeo','career','jobs','locations','store','shop','cart','checkout','login','logout','signin','signup','account','search',
+'share','print','privacy','cookie','terms','accessibility'
+)
 
 def now(): return datetime.now(timezone.utc).isoformat(timespec='seconds')
 def ext(url):
@@ -67,7 +86,7 @@ class Collector:
         self.current_perf=None
         self.run_delay_seconds=0.0
         self.run_export_seconds=0.0
-        self.expansion=dict(parent_budget=0,family_limit=0,query_limit=0,same_family=0,after_page_limit=0)
+        self.expansion=dict(parent_budget=0,family_limit=0,query_limit=0,same_family=0,after_page_limit=0,negative=0,esg_priority=0)
         self.started=time.monotonic(); self.stop=False; self.page_limit=False; self.runtime_limit=False
         self.stats=dict(duplicates=0,pagination_detected=0,pagination_limits=0,pagination_states=0,load_more=0,max_depth=0)
         self.db=sqlite3.connect('crawler.db'); self.db.row_factory=sqlite3.Row; self.init_db()
@@ -108,7 +127,7 @@ class Collector:
     def init_db(self):
         self.db.executescript("""
         PRAGMA journal_mode=WAL;
-        CREATE TABLE IF NOT EXISTS pages(id INTEGER PRIMARY KEY AUTOINCREMENT,seed_url TEXT NOT NULL,page_url TEXT NOT NULL,normalized_url TEXT NOT NULL UNIQUE,parent_url TEXT,link_text TEXT,depth INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'DISCOVERED',page_type TEXT,document_found INTEGER NOT NULL DEFAULT 0,http_status INTEGER,pagination_detected INTEGER NOT NULL DEFAULT 0,pagination_pages_checked INTEGER NOT NULL DEFAULT 1,pagination_limit_reached INTEGER NOT NULL DEFAULT 0,document_url TEXT,document_source TEXT,discovered_order INTEGER,processed_order INTEGER,discovered_at TEXT,processed_at TEXT,error_message TEXT);
+        CREATE TABLE IF NOT EXISTS pages(id INTEGER PRIMARY KEY AUTOINCREMENT,seed_url TEXT NOT NULL,page_url TEXT NOT NULL,normalized_url TEXT NOT NULL UNIQUE,parent_url TEXT,link_text TEXT,priority INTEGER NOT NULL DEFAULT 2,depth INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'DISCOVERED',page_type TEXT,document_found INTEGER NOT NULL DEFAULT 0,http_status INTEGER,pagination_detected INTEGER NOT NULL DEFAULT 0,pagination_pages_checked INTEGER NOT NULL DEFAULT 1,pagination_limit_reached INTEGER NOT NULL DEFAULT 0,document_url TEXT,document_source TEXT,discovered_order INTEGER,processed_order INTEGER,discovered_at TEXT,processed_at TEXT,error_message TEXT);
         CREATE TABLE IF NOT EXISTS links(id INTEGER PRIMARY KEY AUTOINCREMENT,from_url TEXT NOT NULL,to_url TEXT NOT NULL,normalized_to_url TEXT NOT NULL,link_text TEXT,discovered_at TEXT,UNIQUE(from_url,normalized_to_url));
         CREATE TABLE IF NOT EXISTS document_evidence(id INTEGER PRIMARY KEY AUTOINCREMENT,source_url TEXT NOT NULL,document_url TEXT NOT NULL,detection_source TEXT NOT NULL,detected_at TEXT NOT NULL,UNIQUE(source_url,document_url));
         CREATE TABLE IF NOT EXISTS performance(id INTEGER PRIMARY KEY AUTOINCREMENT,source_url TEXT NOT NULL,page_type TEXT,http_status INTEGER,total_seconds REAL,navigation_seconds REAL,stabilization_seconds REAL,interaction_seconds REAL,scan_seconds REAL,other_seconds REAL,retry_count INTEGER,recorded_at TEXT);
@@ -116,7 +135,8 @@ class Collector:
         """); self.db.commit()
     def url_family(self,u):
         parts=[x for x in urlsplit(u).path.lower().split('/') if x]
-        if not parts:return '/'
+        host=(urlsplit(u).hostname or '').lower()
+        if not parts:return host+'/'
         def variable(x):
             if x.isdigit() or re.fullmatch(r'\d{4}',x):return True
             if len(x)>24 and ('-' in x or '_' in x):return True
@@ -125,15 +145,22 @@ class Collector:
         for i,x in enumerate(parts):
             normalized.append('{detail}' if variable(x) and i>=1 else x)
         if len(normalized)>=4:normalized=normalized[:3]+['{detail}']
-        return '/'+ '/'.join(normalized) +'/'
+        return host+'/'+ '/'.join(normalized) +'/'
     def query_path(self,u):
         p=urlsplit(u);return p.scheme+'://'+p.netloc+p.path
+    def signals(self,u,text=''):
+        value=(u+' '+text).lower().replace('_','-')
+        strong=any(x in value for x in ESG_STRONG)
+        negative=any(x in value for x in NEGATIVE)
+        gateway=any(x in value for x in ESG_GATEWAY)
+        return strong,negative,gateway
     def priority(self,u,text=''):
-        value=(u+' '+text).lower()
-        high=('report','result','financial','investor','annual','quarter','sustainab','governance','document','download','publication','resource','filing','presentation','statement','policy','disclosure')
-        medium=('company','about','product','solution','media','news','insight')
-        if any(x in value for x in high):return 0
-        if any(x in value for x in medium):return 1
+        strong,negative,gateway=self.signals(u,text)
+        host=(urlsplit(u).hostname or '').lower()
+        if strong:return 0
+        if host!=self.host and ('investor' in host or 'esg' in host or 'sustain' in host or 'responsib' in host):return 0
+        if negative:return 9
+        if gateway:return 1
         return 2
     def increment_counter(self,name,amount=1):
         self.expansion[name]=self.expansion.get(name,0)+amount
@@ -142,28 +169,33 @@ class Collector:
         return self.db.execute("SELECT COUNT(*) FROM pages WHERE error_message=? OR normalized_url LIKE ?",('family:'+family,'%')).fetchone()[0] if False else sum(1 for r in self.db.execute("SELECT normalized_url FROM pages WHERE status!='SKIPPED'") if self.url_family(r[0])==family)
     def query_variant_count(self,u):
         base=self.query_path(u);return sum(1 for r in self.db.execute("SELECT normalized_url FROM pages WHERE status!='SKIPPED'") if self.query_path(r[0])==base and urlsplit(r[0]).query)
-    def add(self,u,parent,text,depth):
+    def add(self,u,parent,text,depth,priority=None):
         n=self.norm(u,parent or self.seed)
         if not n:return False
         if parent:self.db.execute('INSERT OR IGNORE INTO links(from_url,to_url,normalized_to_url,link_text,discovered_at) VALUES(?,?,?,?,?)',(parent,u,n,text[:500],now()))
         if self.db.execute('SELECT 1 FROM pages WHERE normalized_url=?',(n,)).fetchone():
             self.stats['duplicates']+=1;self.db.commit();return False
+        strong,negative,_=self.signals(n,text)
+        if priority is None:priority=self.priority(n,text)
+        if negative and not strong:
+            self.increment_counter('negative');return False
         ok,why=self.policy(n)
         count=self.db.execute("SELECT COUNT(*) FROM pages WHERE status!='SKIPPED'").fetchone()[0]
         if count>=self.cfg.max_pages_per_website:
             self.page_limit=True;self.increment_counter('after_page_limit');return False
-        if ok and urlsplit(n).query and self.query_variant_count(n)>=self.cfg.max_query_variants_per_path:
+        if ok and priority>0 and urlsplit(n).query and self.query_variant_count(n)>=self.cfg.max_query_variants_per_path:
             self.increment_counter('query_limit');return False
         family=self.url_family(n)
-        if ok and self.family_count(family)>=self.cfg.max_pages_per_url_family:
+        if ok and priority>0 and self.family_count(family)>=self.cfg.max_pages_per_url_family:
             self.increment_counter('family_limit');return False
         status='DISCOVERED';typ=err=None
         if depth>self.cfg.max_depth:status,typ,err='SKIPPED','SKIPPED','Beyond maximum depth'
         elif not ok:status,typ,err='SKIPPED','SKIPPED',why
         order=self.db.execute('SELECT COALESCE(MAX(discovered_order),0)+1 FROM pages').fetchone()[0]
-        self.db.execute('INSERT INTO pages(seed_url,page_url,normalized_url,parent_url,link_text,depth,status,page_type,discovered_order,discovered_at,error_message) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(self.seed,u,n,parent,text[:500],depth,status,typ,order,now(),err));self.db.commit()
-        logging.info('Discovered [%s] depth=%s family=%s %s',status,depth,family,n);return status=='DISCOVERED'
-    def next(self):return self.db.execute("SELECT * FROM pages WHERE status='DISCOVERED' ORDER BY depth DESC,discovered_order DESC LIMIT 1").fetchone()
+        self.db.execute('INSERT INTO pages(seed_url,page_url,normalized_url,parent_url,link_text,priority,depth,status,page_type,discovered_order,discovered_at,error_message) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(self.seed,u,n,parent,text[:500],priority,depth,status,typ,order,now(),err));self.db.commit()
+        if priority==0:self.increment_counter('esg_priority')
+        logging.info('Discovered [%s] priority=%s depth=%s family=%s %s',status,priority,depth,family,n);return status=='DISCOVERED'
+    def next(self):return self.db.execute("SELECT * FROM pages WHERE status='DISCOVERED' ORDER BY priority ASC,depth DESC,discovered_order DESC LIMIT 1").fetchone()
     def expired(self):
         if time.monotonic()-self.started>=self.cfg.max_runtime_minutes*60:self.runtime_limit=True;self.stop=True
         return self.stop
@@ -267,14 +299,19 @@ class Collector:
         for child,text,_ in all_links:
             n=self.norm(child,parent)
             if not n or n in seen or self.doclike(n) or self.is_pagination(n,parent,text):continue
-            seen.add(n)
-            if parent_is_detail and not self.cfg.follow_same_family_links_from_detail_pages and self.url_family(n)==parent_family:
+            seen.add(n);strong,negative,_=self.signals(n,text);rank=self.priority(n,text)
+            if negative and not strong:self.increment_counter('negative');continue
+            if rank>0 and parent_is_detail and not self.cfg.follow_same_family_links_from_detail_pages and self.url_family(n)==parent_family:
                 self.increment_counter('same_family');continue
-            candidates.append((self.priority(n,text),n,text))
-        if self.cfg.prioritize_document_likely_pages:candidates.sort(key=lambda x:(x[0],x[1]))
+            candidates.append((rank,n,text))
+        candidates.sort(key=lambda x:(x[0],x[1]))
         budget=self.cfg.max_homepage_children if parent.rstrip('/')==self.seed.rstrip('/') else self.cfg.max_new_children_per_page
-        for _,n,text in candidates[:budget]:self.add(n,parent,text,depth+1)
-        if len(candidates)>budget:self.increment_counter('parent_budget',len(candidates)-budget)
+        priority_zero=[x for x in candidates if x[0]==0]
+        normal=[x for x in candidates if x[0]>0][:budget]
+        selected=priority_zero+normal
+        for rank,n,text in selected:self.add(n,parent,text,depth+1,rank)
+        ignored=max(0,len([x for x in candidates if x[0]>0])-budget)
+        if ignored:self.increment_counter('parent_budget',ignored)
         return found,all_links,document_url,document_source
     def page2_candidates(self,links,current):
         out=[]
@@ -404,7 +441,7 @@ class Collector:
         self.db.execute("UPDATE pages SET status='FAILED',page_type='FAILED',http_status=?,processed_order=?,processed_at=?,error_message=? WHERE id=?",(status,order,now(),last,row['id']));self.db.commit()
         self.record_perf(u,'FAILED',status,page_started,self.cfg.max_retries);self.current_perf=None
     def export(self):
-        cols='seed_url,page_url,normalized_url,page_type,parent_url,link_text,depth,status,http_status,document_found,pagination_detected,pagination_pages_checked,pagination_limit_reached,document_url,document_source,error_message,discovered_at,processed_at'.split(',')
+        cols='seed_url,page_url,normalized_url,page_type,parent_url,link_text,priority,depth,status,http_status,document_found,pagination_detected,pagination_pages_checked,pagination_limit_reached,document_url,document_source,error_message,discovered_at,processed_at'.split(',')
         rows=self.db.execute('SELECT '+','.join(cols)+' FROM pages ORDER BY discovered_order').fetchall()
         with open('classified_pages.csv','w',newline='',encoding='utf-8-sig') as f:w=csv.DictWriter(f,fieldnames=cols);w.writeheader();w.writerows(dict(r) for r in rows)
         with open('pdf_pages.csv','w',newline='',encoding='utf-8-sig') as f:w=csv.writer(f);w.writerow(['source_url']);w.writerows([[r['normalized_url']] for r in rows if r['page_type']=='PDF'])
@@ -421,7 +458,7 @@ class Collector:
 
     def summary(self):
         c=dict(self.db.execute('SELECT status,COUNT(*) FROM pages GROUP BY status'));t=dict(self.db.execute('SELECT page_type,COUNT(*) FROM pages GROUP BY page_type'));total=self.db.execute('SELECT COUNT(*) FROM pages').fetchone()[0]
-        logging.info('FINAL seed=%s discovered=%s processed=%s PDF=%s HTML=%s failed=%s skipped=%s duplicates=%s pagination=%s pagination_limits=%s pagination_states=%s load_more=%s max_depth=%s page_limit=%s runtime_limit=%s runtime_seconds=%.1f configured_delay_seconds=%.1f export_seconds=%.1f parent_budget_ignored=%s family_limit_ignored=%s query_limit_ignored=%s same_family_ignored=%s after_page_limit_ignored=%s',self.seed,total,c.get('PROCESSED',0),t.get('PDF',0),t.get('HTML',0),c.get('FAILED',0),c.get('SKIPPED',0),self.stats['duplicates'],self.stats['pagination_detected'],self.stats['pagination_limits'],self.stats['pagination_states'],self.stats['load_more'],self.stats['max_depth'],self.page_limit,self.runtime_limit,time.monotonic()-self.started,self.run_delay_seconds,self.run_export_seconds,self.expansion['parent_budget'],self.expansion['family_limit'],self.expansion['query_limit'],self.expansion['same_family'],self.expansion['after_page_limit'])
+        logging.info('FINAL seed=%s discovered=%s processed=%s PDF=%s HTML=%s failed=%s skipped=%s duplicates=%s pagination=%s pagination_limits=%s pagination_states=%s load_more=%s max_depth=%s page_limit=%s runtime_limit=%s runtime_seconds=%.1f configured_delay_seconds=%.1f export_seconds=%.1f parent_budget_ignored=%s family_limit_ignored=%s query_limit_ignored=%s same_family_ignored=%s after_page_limit_ignored=%s negative_ignored=%s esg_prioritized=%s',self.seed,total,c.get('PROCESSED',0),t.get('PDF',0),t.get('HTML',0),c.get('FAILED',0),c.get('SKIPPED',0),self.stats['duplicates'],self.stats['pagination_detected'],self.stats['pagination_limits'],self.stats['pagination_states'],self.stats['load_more'],self.stats['max_depth'],self.page_limit,self.runtime_limit,time.monotonic()-self.started,self.run_delay_seconds,self.run_export_seconds,self.expansion['parent_budget'],self.expansion['family_limit'],self.expansion['query_limit'],self.expansion['same_family'],self.expansion['after_page_limit'],self.expansion['negative'],self.expansion['esg_priority'])
     async def run(self):
         self.add(self.seed,None,'Home',0)
         async with async_playwright() as pw:
