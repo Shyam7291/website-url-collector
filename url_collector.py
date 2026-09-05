@@ -533,6 +533,25 @@ class Collector:
             stabilization_seconds REAL, interaction_seconds REAL, scan_seconds REAL,
             other_seconds REAL, retry_count INTEGER, recorded_at TEXT);
         CREATE TABLE IF NOT EXISTS crawl_counters(name TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS priority_audit(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            seed_url TEXT NOT NULL,
+            parent_url TEXT,
+            candidate_url TEXT NOT NULL,
+            link_text TEXT,
+            source TEXT,
+            depth INTEGER,
+            priority INTEGER,
+            strong_esg INTEGER NOT NULL DEFAULT 0,
+            negative_match INTEGER NOT NULL DEFAULT 0,
+            gateway_match INTEGER NOT NULL DEFAULT 0,
+            document_hub_match INTEGER NOT NULL DEFAULT 0,
+            url_family TEXT,
+            decision TEXT NOT NULL,
+            reason TEXT,
+            recorded_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_priority_decision ON priority_audit(decision,priority);
+        CREATE INDEX IF NOT EXISTS idx_priority_candidate ON priority_audit(candidate_url);
         -- Indexes: these turn the two O(N) full-table scans per discovered URL
         -- (family_count / query_variant_count in v1) into O(log N) lookups.
         CREATE INDEX IF NOT EXISTS idx_pages_queue  ON pages(status,priority,depth,discovered_order);
@@ -626,52 +645,66 @@ class Collector:
     def live_count(self):
         return self.db.execute("SELECT COUNT(*) FROM pages WHERE status!='SKIPPED'").fetchone()[0]
 
+    def audit_priority(self, candidate_url, parent_url, link_text, source, depth,
+                       priority, strong, negative, gateway, dochub, decision, reason=''):
+        family = self.url_family(candidate_url) if candidate_url else ''
+        self.db.execute(
+            'INSERT INTO priority_audit(seed_url,parent_url,candidate_url,link_text,source,depth,'
+            'priority,strong_esg,negative_match,gateway_match,document_hub_match,url_family,'
+            'decision,reason,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            (self.seed, parent_url, candidate_url, (link_text or '')[:500], source, depth,
+             priority, int(strong), int(negative), int(gateway), int(dochub), family,
+             decision, reason, now()))
+
     # ---------------- discovery ----------------
     def add(self, u, parent, text, depth, priority=None, source='link'):
         n = self.norm(u, parent or self.seed)
         if not n:
             return False
         text = (text or '')[:500]
+        strong, negative, gateway, dochub = self.signals(n, text)
+        if priority is None:
+            priority = self.priority(n, text)
         if parent:
             self.db.execute('INSERT OR IGNORE INTO links(from_url,to_url,normalized_to_url,link_text,'
                             'discovered_at) VALUES(?,?,?,?,?)', (parent, u, n, text, now()))
         if self.db.execute('SELECT 1 FROM pages WHERE normalized_url=?', (n,)).fetchone():
             self.stats['duplicates'] += 1
+            self.audit_priority(n, parent, text, source, depth, priority, strong, negative,
+                                gateway, dochub, 'IGNORED', 'DUPLICATE_NORMALIZED_URL')
             return False
-
-        strong, negative, _, _ = self.signals(n, text)
-        if priority is None:
-            priority = self.priority(n, text)
         if negative and not strong:
             self.increment_counter('negative')
+            self.audit_priority(n, parent, text, source, depth, priority, strong, negative,
+                                gateway, dochub, 'IGNORED', 'NEGATIVE_WITHOUT_ESG_OVERRIDE')
             return False
-
         ok, why = self.policy(n)
         if not ok and why == 'blocked by robots.txt':
             self.increment_counter('robots_blocked')
-
         if self.live_count() >= self.cfg.max_pages_per_website:
             self.page_limit = True
             self.increment_counter('after_page_limit')
+            self.audit_priority(n, parent, text, source, depth, priority, strong, negative,
+                                gateway, dochub, 'IGNORED', 'TOTAL_PAGE_LIMIT')
             return False
-
         family = self.url_family(n)
         qpath = self.query_path(n)
         has_query = 1 if urlsplit(n).query else 0
-        if ok and priority > 0 and has_query and \
-                self.query_variant_count(n) >= self.cfg.max_query_variants_per_path:
+        if ok and priority > 0 and has_query and                 self.query_variant_count(n) >= self.cfg.max_query_variants_per_path:
             self.increment_counter('query_limit')
+            self.audit_priority(n, parent, text, source, depth, priority, strong, negative,
+                                gateway, dochub, 'IGNORED', 'QUERY_VARIANT_LIMIT')
             return False
         if ok and priority > 0 and self.family_count(family) >= self.cfg.max_pages_per_url_family:
             self.increment_counter('family_limit')
+            self.audit_priority(n, parent, text, source, depth, priority, strong, negative,
+                                gateway, dochub, 'IGNORED', 'URL_FAMILY_LIMIT')
             return False
-
         status, typ, err = 'DISCOVERED', None, None
         if depth > self.cfg.max_depth:
             status, typ, err = 'SKIPPED', 'SKIPPED', 'Beyond maximum depth'
         elif not ok:
             status, typ, err = 'SKIPPED', 'SKIPPED', why
-
         order = self.db.execute('SELECT COALESCE(MAX(discovered_order),0)+1 FROM pages').fetchone()[0]
         try:
             self.db.execute(
@@ -682,12 +715,16 @@ class Collector:
                  has_query, order, now(), err))
         except sqlite3.IntegrityError:
             self.stats['duplicates'] += 1
+            self.audit_priority(n, parent, text, source, depth, priority, strong, negative,
+                                gateway, dochub, 'IGNORED', 'DUPLICATE_INSERT_RACE')
             return False
         if priority == 0:
             self.increment_counter('esg_priority')
+        decision = 'QUEUED' if status == 'DISCOVERED' else 'SKIPPED'
+        self.audit_priority(n, parent, text, source, depth, priority, strong, negative,
+                            gateway, dochub, decision, err or 'ACCEPTED')
         logging.info('Discovered [%s] p=%s d=%s src=%s %s', status, priority, depth, source, n)
         return status == 'DISCOVERED'
-
     def claim_next(self):
         """Atomic claim so N workers never take the same row.
         Shallow best-first (depth ASC): document hubs sit near the root, whereas v1
@@ -700,6 +737,10 @@ class Collector:
             if row:
                 self.db.execute("UPDATE pages SET status='PROCESSING',attempts=attempts+1 WHERE id=?",
                                 (row['id'],))
+                strong, negative, gateway, dochub = self.signals(row['normalized_url'], row['link_text'] or '')
+                self.audit_priority(row['normalized_url'], row['parent_url'], row['link_text'] or '',
+                                    'queue', row['depth'], row['priority'], strong, negative,
+                                    gateway, dochub, 'CLAIMED', 'SELECTED_BY_PRIORITY_DEPTH_ORDER')
             self.db.execute('COMMIT')
             return row
         except Exception:
@@ -1051,9 +1092,13 @@ class Collector:
         selected = p0 + p1 + p2 + p3
         for rank, n, text in selected:
             self.add(n, parent, text, depth + 1, rank)
-        ignored = max(0, len(candidates) - len(selected))
-        if ignored:
-            self.increment_counter('parent_budget', ignored)
+        ignored_candidates = [x for x in candidates if x not in selected]
+        for rank, n, text in ignored_candidates:
+            strong, negative, gateway, dochub = self.signals(n, text)
+            self.audit_priority(n, parent, text, 'link', depth + 1, rank, strong, negative,
+                                gateway, dochub, 'IGNORED', 'PARENT_PRIORITY_BUDGET')
+        if ignored_candidates:
+            self.increment_counter('parent_budget', len(ignored_candidates))
         return documents, all_links
 
     # ---------------- pagination ----------------
@@ -1496,6 +1541,13 @@ class Collector:
         dump('skipped_pages.csv', ['source_url', 'reason', 'depth'],
              [[r['normalized_url'], r['error_message'], r['depth']] for r in rows
               if r['status'] == 'SKIPPED'])
+        audit_cols = ['seed_url','parent_url','candidate_url','link_text','source','depth','priority',
+                      'strong_esg','negative_match','gateway_match','document_hub_match','url_family',
+                      'decision','reason','recorded_at']
+        audit_rows = self.db.execute('SELECT ' + ','.join(audit_cols) +
+                                     ' FROM priority_audit ORDER BY id').fetchall()
+        dump('PRIORITY_REPORT.csv', audit_cols,
+             [[r[c] for c in audit_cols] for r in audit_rows])
         perf_cols = ['source_url', 'page_type', 'http_status', 'total_seconds', 'navigation_seconds',
                      'stabilization_seconds', 'interaction_seconds', 'scan_seconds', 'other_seconds',
                      'retry_count']
@@ -1612,6 +1664,7 @@ def aggregate_outputs(root: Path, collectors):
         'document_evidence.csv': None,
         'skipped_pages.csv': None,
         'PERFORMANCE_REPORT.csv': None,
+        'PRIORITY_REPORT.csv': None,
     }
     for name in specs:
         header = None
