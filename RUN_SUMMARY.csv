@@ -14,3 +14,4 @@ run_date,seed_url,max_pages_requested,discovered,processed,pdf_pages,html_pages,
 2026-09-05 07:42:24 UTC,https://www.gehealthcare.com/en-us,200,586,180,52,128,21,385,0,QUEUE_EXHAUSTED,true,false,false,5
 2026-09-05 08:11:19 UTC,https://www.gehealthcare.com/en-us,200,585,180,55,125,21,384,0,QUEUE_EXHAUSTED,true,false,false,5
 2026-09-05 08:27:51 UTC,https://www.arcelikglobal.com/en/,200,289,143,51,92,4,142,0,QUEUE_EXHAUSTED,true,false,false,3
+2026-09-05 09:46:06 UTC,https://www.arcelikglobal.com/en/,200,234,200,66,134,1,33,0,QUEUE_EXHAUSTED,true,false,false,2
